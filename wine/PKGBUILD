@@ -1,5 +1,4 @@
-# Maintainer: Daniel Bermond <dbermond@archlinux.org>
-# Maintainer: Zebra2711
+# Source : https://aur.archlinux.org/packages/wine-git
 
 pkgname=wine-staging-git
 pkgver=10.0.rc3.r0.gd7a7cae2e2d
