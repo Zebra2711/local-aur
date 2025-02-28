@@ -1,7 +1,7 @@
 # Source : https://aur.archlinux.org/packages/wine-git
 
 pkgname=wine-staging-git
-pkgver=10.0.rc3.r0.gd7a7cae2e2d
+pkgver=10.2.r118.g0bf15e3e071
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -84,9 +84,9 @@ prepare() {
     mkdir -p build-{32,64}
     
     # restore the wine tree to its git origin state, without wine-staging patches
-    #printf '%s\n' '  -> Cleaning wine source code tree...'
-    #git -C wine reset --hard HEAD  # restore tracked files
-    #git -C wine clean -xdf         # delete untracked files
+    printf '%s\n' '  -> Cleaning wine source code tree...'
+    git -C wine reset --hard HEAD  # restore tracked files
+    git -C wine clean -xdf         # delete untracked files
     
     # change back to the wine ustream commit that this version of wine-staging is based in
     #printf '%s\n' '  -> Changing wine HEAD to the wine-staging base commit...'
@@ -118,14 +118,19 @@ build() {
     # build wine-staging 64-bit
     # (according to the wine wiki, this 64-bit/32-bit building order is mandatory)
     printf '%s\n' '  -> Building wine-staging-64...'
-    cd build-64
+    cd "${srcdir}/build-64"
     ../wine/configure \
         --prefix='/usr' \
         --libdir='/usr/lib' \
         --with-x \
+        --with-wayland \
         --with-gstreamer \
+        --with-alsa \
+        --without-oss \
+        --disable-winemenubuilder \
         --with-xattr \
-        --enable-win64
+        --enable-win64 \
+        --disable-tests
     make
     
     # build wine-staging 32-bit
@@ -134,11 +139,16 @@ build() {
     export PKG_CONFIG_PATH='/usr/lib32/pkgconfig'
     ../wine/configure \
         --prefix='/usr' \
-        --libdir='/usr/lib32' \
+        --libdir='/usr/lib' \
         --with-x \
+        --with-wayland \
         --with-gstreamer \
+        --with-alsa \
+        --without-oss \
+        --disable-winemenubuilder 
         --with-xattr \
-        --with-wine64="${srcdir}/build-64"
+        --with-wine64="${srcdir}/build-64" \
+        --disable-tests
     make
 }
 
@@ -148,10 +158,12 @@ package() {
     printf '%s\n' '  -> Packaging wine-staging-32...'
     cd build-32
     make prefix="${pkgdir}/usr" \
-         libdir="${pkgdir}/usr/lib32" \
-         dlldir="${pkgdir}/usr/lib32/wine" \
+         libdir="${pkgdir}/usr/lib" \
+         dlldir="${pkgdir}/usr/lib/wine" \
          install
-    
+
+    mv ${pkgdir}/usr/lib ${pkgdir}/usr/lib32
+
     # package wine-staging 64-bit
     printf '%s\n' '  -> Packaging wine-staging-64...'
     cd "${srcdir}/build-64"
