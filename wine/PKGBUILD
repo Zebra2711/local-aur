@@ -162,8 +162,6 @@ package() {
          dlldir="${pkgdir}/usr/lib/wine" \
          install
 
-    mv ${pkgdir}/usr/lib ${pkgdir}/usr/lib32
-
     # package wine-staging 64-bit
     printf '%s\n' '  -> Packaging wine-staging-64...'
     cd "${srcdir}/build-64"
@@ -181,7 +179,7 @@ package() {
     install -D -m644 "${srcdir}/wine-binfmt.conf" "${pkgdir}/usr/lib/binfmt.d/wine.conf"
     
     # strip native PE libraries
-    i686-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib32/wine/i386-windows"/*.dll
+    i686-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib/wine/i386-windows"/*.dll
     "${CARCH}-w64-mingw32-strip" --strip-unneeded "${pkgdir}/usr/lib/wine/${CARCH}-windows"/*.dll
 }
 
