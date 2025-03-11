@@ -1,7 +1,7 @@
-# Source : https://aur.archlinux.org/packages/wine-git
+# Maintainer: Daniel Bermond <dbermond@archlinux.org>
 
 pkgname=wine-staging-git
-pkgver=10.2.r118.g0bf15e3e071
+pkgver=10.3.r15.g4cb856a95de
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -19,31 +19,34 @@ depends=(
     'libpcap'          'lib32-libpcap'
     'desktop-file-utils'
 )
-makedepends=('git' 'perl' 'mingw-w64-gcc'
-    'giflib'                'lib32-giflib'
-    'gnutls'                'lib32-gnutls'
-    'libxinerama'           'lib32-libxinerama'
-    'libxcomposite'         'lib32-libxcomposite'
-    'libxxf86vm'            'lib32-libxxf86vm'
-    'v4l-utils'             'lib32-v4l-utils'
-    'alsa-lib'              'lib32-alsa-lib'
-    'libxcomposite'         'lib32-libxcomposite'
-    'mesa'                  'lib32-mesa'
-    'mesa-libgl'            'lib32-mesa-libgl'
-    'opencl-icd-loader'     'lib32-opencl-icd-loader'
-    'libpulse'              'lib32-libpulse'
-    'libva'                 'lib32-libva'
-    'gtk3'                  'lib32-gtk3'
-    'gst-plugins-base-libs' 'lib32-gst-plugins-base-libs'
-    'vulkan-icd-loader'     'lib32-vulkan-icd-loader'
-    'sdl2'                  'lib32-sdl2'
-    'libcups'               'lib32-libcups'
-    'sane'
-    'libgphoto2'
-    'ffmpeg'
-    'samba'
-    'opencl-headers'
+makedepends=(autoconf bison perl flex mingw-w64-gcc
+  git
+  giflib                lib32-giflib
+  gnutls                lib32-gnutls
+  libxinerama           lib32-libxinerama
+  libxcomposite         lib32-libxcomposite
+  libxxf86vm            lib32-libxxf86vm
+  v4l-utils             lib32-v4l-utils
+  alsa-lib              lib32-alsa-lib
+  libxcomposite         lib32-libxcomposite
+  mesa                  lib32-mesa
+  mesa-libgl            lib32-mesa-libgl
+  opencl-icd-loader     lib32-opencl-icd-loader
+  libpulse              lib32-libpulse
+  libva                 lib32-libva
+  gtk3                  lib32-gtk3
+  gst-plugins-base-libs lib32-gst-plugins-base-libs
+  vulkan-icd-loader     lib32-vulkan-icd-loader
+  sdl3                  lib32-sdl3
+  sdl2-compat           lib32-sdl2-compat
+  libcups               lib32-libcups
+  sane
+  libgphoto2
+  ffmpeg
+  samba
+  opencl-headers
 )
+
 optdepends=(
     'giflib'                'lib32-giflib'
     'gnutls'                'lib32-gnutls'
@@ -54,18 +57,23 @@ optdepends=(
     'libxcomposite'         'lib32-libxcomposite'
     'libxinerama'           'lib32-libxinerama'
     'opencl-icd-loader'     'lib32-opencl-icd-loader'
+    'opencl-nvidia'         'lib32-opencl-nvidia'
     'libva'                 'lib32-libva'
     'gtk3'                  'lib32-gtk3'
     'gst-plugins-base-libs' 'lib32-gst-plugins-base-libs'
     'vulkan-icd-loader'     'lib32-vulkan-icd-loader'
-    'sdl2'                  'lib32-sdl2'
+    'sdl3'                  'lib32-sdl3'
+    'sdl2-compat'           'lib32-sdl2-compat'
     'sane'
     'libgphoto2'
     'ffmpeg'
-    'cups'
+    'cups'                  'lib32-libcups'
     'samba'
     'dosbox'
+    'wine-gecko'
+    'wine-mono'
 )
+_tkg_commit=21d3c43e7c4d5e817657ad9f3e21616b2c5de52a
 options=('staticlibs' '!lto' '!debug')
 install="${pkgname}.install"
 provides=("wine-staging=${pkgver}" "wine=${pkgver%%.r*}" 'wine-wow64')
@@ -73,13 +81,27 @@ conflicts=('wine' 'wine-wow64')
 source=('git+https://gitlab.winehq.org/wine/wine-staging.git'
         'git+https://gitlab.winehq.org/wine/wine.git'
         '30-win32-aliases.conf'
-        'wine-binfmt.conf')
+        'wine-binfmt.conf'
+        "git+https://github.com/Frogging-Family/wine-tkg-git.git#commit=${_tkg_commit}"
+        '0001-win32u-Update-Nvidia-s-DriverVersion-to-999.99.patch'
+        'wine-ntsync.patch'
+        'wine-wmclass.patch'
+        'wine-isolate_home.patch')
 sha256sums=('SKIP'
             'SKIP'
             '9901a5ee619f24662b241672a7358364617227937d5f6d3126f70528ee5111e7'
-            '6dfdefec305024ca11f35ad7536565f5551f09119dda2028f194aee8f77077a4')
+            '6dfdefec305024ca11f35ad7536565f5551f09119dda2028f194aee8f77077a4'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP')
 
 prepare() {
+    # Allow ccache to work
+    #mv wine $pkgname
+
+    # Get rid of old build dirs
     rm -rf build-{32,64}
     mkdir -p build-{32,64}
     
@@ -92,32 +114,77 @@ prepare() {
     #printf '%s\n' '  -> Changing wine HEAD to the wine-staging base commit...'
     #git -C wine config --local advice.detachedHead false
     #git -C wine checkout "$(wine-staging/staging/patchinstall.py --upstream-commit)"
-    
+
+
     # apply all wine-staging patches
     printf '%s\n' '  -> Applying wine-staging patches...'
-    wine-staging/staging/patchinstall.py DESTDIR="${srcdir}/wine" --all
+    wine-staging/staging/patchinstall.py DESTDIR="${srcdir}/wine" --all \
+    --no-autoconf \
+    -W eventfd_synchronization \
+    -W server-PeekMessage \
+    -W server-Signal_Thread
+
+    #patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync.patch
+
+    _tkg_path="$srcdir"/wine-tkg-git/wine-tkg-git/wine-tkg-patches
+    patch -Np1 -d wine -i "$_tkg_path"/proton/LAA/LAA-unix-staging.patch
+    patch -Np1 -d wine -i "$_tkg_path"/proton/msvcrt_nativebuiltin/msvcrt_nativebuiltin_mainline.patch
+    patch -Np1 -d wine -i "$_tkg_path"/proton/proton-win10-default/proton-win10-default.patch
+    
+    
+
+    patch -Np1 -d wine -i "$srcdir"/wine-wmclass.patch
+    patch -Np1 -d wine -i "$srcdir"/wine-isolate_home.patch
+    # patch -Np1 -d wine -i "$srcdir"/0001-win32u-Update-Nvidia-s-DriverVersion-to-999.99.patch
+    
+    cd wine
+    ./tools/make_requests
+    ./dlls/winevulkan/make_vulkan
+    ./tools/make_specfiles
+    autoreconf -fiv
 }
 
 pkgver() {
-    git -C wine describe --long --tags | sed 's/\([^-]*-g\)/r\1/;s/-/./g;s/^wine.//;s/^v//'
+    git -C wine describe --long --tags | sed 's/\([^-]*-g\)/r\1/;s/-/./g;s/^wine.//;s/^v//;s/.rc/rc/'
 }
 
 build() {
-
     # Doesn't compile without remove these flags as of 4.10
-    export CFLAGS+=' -ffat-lto-objects'
+    # incompatible-pointer-types: https://bugs.gentoo.org/919758
+    export CFLAGS="$CFLAGS -ffat-lto-objects -Wno-error=incompatible-pointer-types"
     
     # apply flags for cross-compilation
-    export CROSSCFLAGS="${CFLAGS/-Werror=format-security/} -g"
-    export CROSSCXXFLAGS="${CXXFLAGS/-Werror=format-security/} -g"
-    export CROSSLDFLAGS="${LDFLAGS//-Wl,-z*([^[:space:]])/}"
+    export CROSSCFLAGS="-O2 -pipe"
+    export CROSSCXXFLAGS="-O2 -pipe"
+    export CROSSLDFLAGS="-Wl,-O1"
     
-    # fix build with gcc 14
-    export CFLAGS+=' -Wno-incompatible-pointer-types'
-    
+    local -a split=($CFLAGS)
+    local -A flags
+    for opt in "${split[@]}"; do flags["${opt%%=*}"]="${opt##*=}"; done
+    local march="${flags["-march"]:-nocona}"
+    local mtune="${flags["-mtune"]:-core-avx2}"
+
+    # From Proton
+    OPTIMIZE_FLAGS="-O3 -march=$march -mtune=$mtune -mfpmath=sse -pipe"
+    SANITY_FLAGS="-fwrapv -fno-strict-aliasing"
+    WARNING_FLAGS="-Wno-incompatible-pointer-types"
+    STRIP_FLAGS="-s"
+    COMMON_FLAGS="$OPTIMIZE_FLAGS $SANITY_FLAGS $WARNING_FLAGS $STRIP_FLAGS"
+
+    COMMON_LDFLAGS="-Wl,-O1,--sort-common,--as-needed"
+
+    export LDFLAGS="$COMMON_LDFLAGS $LTO_LDFLAGS"
+    export CROSSLDFLAGS="$COMMON_LDFLAGS -Wl,--file-alignment,4096"
+
+
     # build wine-staging 64-bit
     # (according to the wine wiki, this 64-bit/32-bit building order is mandatory)
     printf '%s\n' '  -> Building wine-staging-64...'
+    export CFLAGS="$COMMON_FLAGS -mcmodel=small $LTO_CFLAGS"
+    export CXXFLAGS="$COMMON_FLAGS -mcmodel=small -std=c++17 $LTO_CFLAGS"
+    export CROSSCFLAGS="$COMMON_FLAGS -mcmodel=small"
+    export CROSSCXXFLAGS="$COMMON_FLAGS -mcmodel=small -std=c++17"
+    export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig"
     cd "${srcdir}/build-64"
     ../wine/configure \
         --prefix='/usr' \
@@ -125,6 +192,7 @@ build() {
         --with-x \
         --with-wayland \
         --with-gstreamer \
+        --with-mingw \
         --with-alsa \
         --without-oss \
         --disable-winemenubuilder \
@@ -135,6 +203,11 @@ build() {
     
     # build wine-staging 32-bit
     printf '%s\n' '  -> Building wine-staging-32...'
+    export CFLAGS="$COMMON_FLAGS -mstackrealign $LTO_CFLAGS"
+    export CXXFLAGS="$COMMON_FLAGS -mstackrealign -std=c++17 $LTO_CFLAGS"
+    export CROSSCFLAGS="$COMMON_FLAGS -mstackrealign"
+    export CROSSCXXFLAGS="$COMMON_FLAGS -mstackrealign -std=c++17"
+    export PKG_CONFIG_PATH="/usr/lib32/pkgconfig:/usr/share/pkgconfig"
     cd "${srcdir}/build-32"
     export PKG_CONFIG_PATH='/usr/lib32/pkgconfig'
     ../wine/configure \
@@ -143,9 +216,10 @@ build() {
         --with-x \
         --with-wayland \
         --with-gstreamer \
+        --with-mingw \
         --with-alsa \
         --without-oss \
-        --disable-winemenubuilder 
+        --disable-winemenubuilder \
         --with-xattr \
         --with-wine64="${srcdir}/build-64" \
         --disable-tests
@@ -154,13 +228,15 @@ build() {
 
 package() {
     # package wine-staging 32-bit
-    # (according to the wine wiki, this reverse 32-bit/64-bit packaging order is important)
+    #(according to the wine wiki, this reverse 32-bit/64-bit packaging order is important)
     printf '%s\n' '  -> Packaging wine-staging-32...'
-    cd build-32
+    cd "${srcdir}/build-32"
     make prefix="${pkgdir}/usr" \
          libdir="${pkgdir}/usr/lib" \
          dlldir="${pkgdir}/usr/lib/wine" \
          install
+    
+    #mv ${pkgdir}/usr/lib ${pkgdir}/usr/lib32
 
     # package wine-staging 64-bit
     printf '%s\n' '  -> Packaging wine-staging-64...'
@@ -169,7 +245,7 @@ package() {
          libdir="${pkgdir}/usr/lib" \
          dlldir="${pkgdir}/usr/lib/wine" \
          install
-    
+     
     # font aliasing settings for win32 applications
     install -d -m755 "${pkgdir}/usr/share/fontconfig/conf.default"
     install -D -m644 "${srcdir}/30-win32-aliases.conf" -t "${pkgdir}/usr/share/fontconfig/conf.avail"
@@ -179,7 +255,8 @@ package() {
     install -D -m644 "${srcdir}/wine-binfmt.conf" "${pkgdir}/usr/lib/binfmt.d/wine.conf"
     
     # strip native PE libraries
-    i686-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib/wine/i386-windows"/*.dll
-    "${CARCH}-w64-mingw32-strip" --strip-unneeded "${pkgdir}/usr/lib/wine/${CARCH}-windows"/*.dll
-}
+    i686-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib/wine/i386-windows"/*.{dll,exe}
+    x86_64-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib/wine/x86_64-windows"/*.{dll,exe}
 
+}
+# vim:set ts=8 sts=2 sw=2 et:
