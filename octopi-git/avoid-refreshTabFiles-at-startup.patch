@@ -1,0 +1,18 @@
+Author: Zebra2711 <fbi1266friends@gmail.com>
+Date:   Sun Mar 16 13:58:28 2025 +0700
+    don't refreshTabFiles when startup
+    
+    Avoid refreshTabFiles at startup which significantly increases startup time.
+diff --git a/src/mainwindow.cpp b/src/mainwindow.cpp
+index a8f1d20d..9ef89acb 100644
+--- a/src/mainwindow.cpp
++++ b/src/mainwindow.cpp
+@@ -1840,7 +1840,8 @@ void MainWindow::clearTabsInfoOrFiles()
+   }
+   else if(ui->twProperties->currentIndex() == ctn_TABINDEX_FILES) //This is TabFiles
+   {
+-    refreshTabFiles(); //(true, false);
++    // Don't refresh on first start so just comment this line
++    //refreshTabFiles(); //(true, false);
+     return;
+   }
