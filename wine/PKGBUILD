@@ -1,7 +1,8 @@
 # Maintainer: Daniel Bermond <dbermond@archlinux.org>
 
+NTSYNC=1
 pkgname=wine-staging-git
-pkgver=10.3.r15.g4cb856a95de
+pkgver=10.3.r230.ntsync.g3323a7e4474
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -73,7 +74,7 @@ optdepends=(
     'wine-gecko'
     'wine-mono'
 )
-_tkg_commit=21d3c43e7c4d5e817657ad9f3e21616b2c5de52a
+_tkg_commit=b23227964ea3dcac210603a0a6ffd3ca91d3e10e
 options=('staticlibs' '!lto' '!debug')
 install="${pkgname}.install"
 provides=("wine-staging=${pkgver}" "wine=${pkgver%%.r*}" 'wine-wow64')
@@ -104,12 +105,12 @@ prepare() {
     # Get rid of old build dirs
     rm -rf build-{32,64}
     mkdir -p build-{32,64}
-    
+
     # restore the wine tree to its git origin state, without wine-staging patches
     printf '%s\n' '  -> Cleaning wine source code tree...'
     git -C wine reset --hard HEAD  # restore tracked files
     git -C wine clean -xdf         # delete untracked files
-    
+
     # change back to the wine ustream commit that this version of wine-staging is based in
     #printf '%s\n' '  -> Changing wine HEAD to the wine-staging base commit...'
     #git -C wine config --local advice.detachedHead false
@@ -123,20 +124,23 @@ prepare() {
     -W eventfd_synchronization \
     -W server-PeekMessage \
     -W server-Signal_Thread
+    #-W d3dx9_SetRawValue
 
-    #patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync.patch
+    if [[ "$NTSYNC" -eq "1" ]]; then
+      patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync.patch
+    fi
 
     _tkg_path="$srcdir"/wine-tkg-git/wine-tkg-git/wine-tkg-patches
     patch -Np1 -d wine -i "$_tkg_path"/proton/LAA/LAA-unix-staging.patch
     patch -Np1 -d wine -i "$_tkg_path"/proton/msvcrt_nativebuiltin/msvcrt_nativebuiltin_mainline.patch
     patch -Np1 -d wine -i "$_tkg_path"/proton/proton-win10-default/proton-win10-default.patch
-    
-    
+
+
 
     patch -Np1 -d wine -i "$srcdir"/wine-wmclass.patch
     patch -Np1 -d wine -i "$srcdir"/wine-isolate_home.patch
     # patch -Np1 -d wine -i "$srcdir"/0001-win32u-Update-Nvidia-s-DriverVersion-to-999.99.patch
-    
+    sudo -v
     cd wine
     ./tools/make_requests
     ./dlls/winevulkan/make_vulkan
@@ -145,19 +149,24 @@ prepare() {
 }
 
 pkgver() {
-    git -C wine describe --long --tags | sed 's/\([^-]*-g\)/r\1/;s/-/./g;s/^wine.//;s/^v//;s/.rc/rc/'
+    _pkgver=$(git -C wine describe --long --tags | sed 's/\([^-]*-g\)/r\1/;s/-/./g;s/^wine\.//;s/^v//;s/\.rc/rc/')
+    if [[ "$NTSYNC" -eq "1" ]]; then
+        echo "$_pkgver" | sed 's/g/ntsync.g/'
+    else
+        echo "$_pkgver"
+    fi
 }
 
 build() {
     # Doesn't compile without remove these flags as of 4.10
     # incompatible-pointer-types: https://bugs.gentoo.org/919758
     export CFLAGS="$CFLAGS -ffat-lto-objects -Wno-error=incompatible-pointer-types"
-    
+
     # apply flags for cross-compilation
     export CROSSCFLAGS="-O2 -pipe"
     export CROSSCXXFLAGS="-O2 -pipe"
     export CROSSLDFLAGS="-Wl,-O1"
-    
+
     local -a split=($CFLAGS)
     local -A flags
     for opt in "${split[@]}"; do flags["${opt%%=*}"]="${opt##*=}"; done
@@ -200,7 +209,7 @@ build() {
         --enable-win64 \
         --disable-tests
     make
-    
+
     # build wine-staging 32-bit
     printf '%s\n' '  -> Building wine-staging-32...'
     export CFLAGS="$COMMON_FLAGS -mstackrealign $LTO_CFLAGS"
@@ -235,7 +244,7 @@ package() {
          libdir="${pkgdir}/usr/lib" \
          dlldir="${pkgdir}/usr/lib/wine" \
          install
-    
+
     #mv ${pkgdir}/usr/lib ${pkgdir}/usr/lib32
 
     # package wine-staging 64-bit
@@ -245,15 +254,15 @@ package() {
          libdir="${pkgdir}/usr/lib" \
          dlldir="${pkgdir}/usr/lib/wine" \
          install
-     
+
     # font aliasing settings for win32 applications
     install -d -m755 "${pkgdir}/usr/share/fontconfig/conf.default"
     install -D -m644 "${srcdir}/30-win32-aliases.conf" -t "${pkgdir}/usr/share/fontconfig/conf.avail"
     ln -s ../conf.avail/30-win32-aliases.conf "${pkgdir}/usr/share/fontconfig/conf.default/30-win32-aliases.conf"
-    
+
     # wine binfmt
     install -D -m644 "${srcdir}/wine-binfmt.conf" "${pkgdir}/usr/lib/binfmt.d/wine.conf"
-    
+
     # strip native PE libraries
     i686-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib/wine/i386-windows"/*.{dll,exe}
     x86_64-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib/wine/x86_64-windows"/*.{dll,exe}
