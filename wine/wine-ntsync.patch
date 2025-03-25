@@ -1586,7 +1586,7 @@ index 15df3b42f31..ea6533a63cb 100644
 +    struct get_inproc_alert_event_reply get_inproc_alert_event_reply;
  };
  
--#define SERVER_PROTOCOL_VERSION 859
+-#define SERVER_PROTOCOL_VERSION 863
 +#define SERVER_PROTOCOL_VERSION 866
  
  #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -2,7 +2,7 @@
 
 NTSYNC=1
 pkgname=wine-staging-git
-pkgver=10.3.r230.ntsync.g3323a7e4474
+pkgver=10.4.r29.ntsync.gaae9ba21cef
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
