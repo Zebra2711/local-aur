@@ -1,0 +1,43 @@
+# Maintainer: Jonathan Liu <net147@gmail.com>
+
+pkgname=edid-decode
+_gitname=edid-decode
+pkgver=r720.5332a3b
+pkgrel=1
+pkgdesc="EDID decoder and conformance tester"
+url="https://git.linuxtv.org/edid-decode.git/"
+arch=('i686' 'x86_64')
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+makedepends=('git' 'meson')
+provides=('edid-decode')
+source=('git+https://git.linuxtv.org/edid-decode.git')
+md5sums=('SKIP')
+
+pkgver() {
+  cd "$_gitname"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$_gitname"
+  # build on lasted commit before commit "moved to v4l-utils, remove all code"
+  # https://git.linuxtv.org/edid-decode.git/commit/?id=5332a3b76080e17137db15fd31e2d3949cef5f84
+  git checkout 5332a3b76080e17137db15fd31e2d3949cef5f84
+}
+
+build() {
+  cd "$_gitname"
+  meson setup --prefix=/usr build
+  meson compile -C build
+}
+
+package() {
+  cd "$_gitname"
+  DESTDIR="$pkgdir" meson install -C build
+  install -d -m 755 "$pkgdir/usr/share/licenses/$pkgname"
+  sed -n '1,/^$/p' edid-decode.cpp | head -n -2 > "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+# vim:set ts=2 sw=2 et:
+
