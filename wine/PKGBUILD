@@ -2,7 +2,7 @@
 
 NTSYNC=1
 pkgname=wine-staging-git
-pkgver=10.4.r29.ntsync.gaae9ba21cef
+pkgver=10.4.r54.ntsync.g3379ee2e6b5
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -75,6 +75,7 @@ optdepends=(
     'wine-mono'
 )
 _tkg_commit=b23227964ea3dcac210603a0a6ffd3ca91d3e10e
+_winehq_mr=https://gitlab.winehq.org/wine/wine/-/merge_requests/
 options=('staticlibs' '!lto' '!debug')
 install="${pkgname}.install"
 provides=("wine-staging=${pkgver}" "wine=${pkgver%%.r*}" 'wine-wow64')
@@ -88,15 +89,35 @@ source=('git+https://gitlab.winehq.org/wine/wine-staging.git'
         'wine-ntsync.patch'
         'wine-wmclass.patch'
         'wine-isolate_home.patch')
+
+# Merge Request (MR) Patches
+# Format: [MR_NUMBER]="Short description of the patch"
+declare -A _mr_patches=(
+    [7661]="gdiplus: Fix GdipReversePath for mixed Bezier and Line points in subpath"
+    [7653]="windowscodecs/metadata: Always initialize handler pointer."
+    [7630]="winebth.sys part 7: Introduce support for authentication/pairing."
+    [7636]="d3dx9: Implement saving to DDS files in D3DXSaveTextureToFileInMemory()."
+    # Add new merge requests here with their descriptions
+)
+
+# List MR pacth from wine HQ
+for mr in "${!_mr_patches[@]}"; do
+    source+=("${mr}.patch::${_winehq_mr}/${mr}.patch")
+done
+
 sha256sums=('SKIP'
             'SKIP'
             '9901a5ee619f24662b241672a7358364617227937d5f6d3126f70528ee5111e7'
             '6dfdefec305024ca11f35ad7536565f5551f09119dda2028f194aee8f77077a4'
             'SKIP'
-            'SKIP'
-            'SKIP'
-            'SKIP'
-            'SKIP')
+            'd50d555cf7a27d70311509198ede00072f5edd4240786335f3024c8b69036d7c'
+            '3969475311aecc8902b69db3c231a48a8bb51ee08df4b4e0e0a6f31d196f1244'
+            '6d3d18de38b2af6b3dce335b99bf8fce81fc44ad8a65119ea75eb5e102b1f17d'
+            '959272d91ea6928a14ca821b2d71d543fa9043d3c00a8125f9cdbaeee6289fdb')
+#---------< source + >---------
+for mr in "${!_mr_patches[@]}"; do
+        sha256sums+=('SKIP')
+done
 
 prepare() {
     # Allow ccache to work
@@ -140,7 +161,14 @@ prepare() {
     patch -Np1 -d wine -i "$srcdir"/wine-wmclass.patch
     patch -Np1 -d wine -i "$srcdir"/wine-isolate_home.patch
     # patch -Np1 -d wine -i "$srcdir"/0001-win32u-Update-Nvidia-s-DriverVersion-to-999.99.patch
-    sudo -v
+
+    # Test MR Patch from gitlab wineHQ
+    for mr in "${!_mr_patches[@]}"; do
+        printf '%s\n' "  -> Applying MR ${mr} patch: ${_mr_patches[${mr}]}"
+        patch -Np1 -d wine -i "$srcdir/${mr}.patch"
+    done
+
+    sudo -v # pause screen
     cd wine
     ./tools/make_requests
     ./dlls/winevulkan/make_vulkan
@@ -244,8 +272,6 @@ package() {
          libdir="${pkgdir}/usr/lib" \
          dlldir="${pkgdir}/usr/lib/wine" \
          install
-
-    #mv ${pkgdir}/usr/lib ${pkgdir}/usr/lib32
 
     # package wine-staging 64-bit
     printf '%s\n' '  -> Packaging wine-staging-64...'

@@ -1587,7 +1587,7 @@ index 15df3b42f31..ea6533a63cb 100644
  };
  
 -#define SERVER_PROTOCOL_VERSION 863
-+#define SERVER_PROTOCOL_VERSION 866
++#define SERVER_PROTOCOL_VERSION 874
  
  #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
 diff --git a/server/Makefile.in b/server/Makefile.in
@@ -1766,9 +1766,9 @@ index c3e7bf57e92..52448985632 100644
      struct async_queue           ioctl_q;       /* ioctl queue */
      struct async_queue           read_q;        /* read queue */
 +    struct inproc_sync          *inproc_sync;   /* in-process synchronization object */
- };
- 
- static void console_dump( struct object *obj, int verbose );
+     struct list                  screen_buffers;/* attached screen buffers */
+     struct list                  inputs;        /* attached console inputs */
+     struct list                  outputs;       /* attached console outputs */
 @@ -72,6 +73,7 @@ static struct object *console_lookup_name( struct object *obj, struct unicode_st
  static struct object *console_open_file( struct object *obj, unsigned int access,
                                           unsigned int sharing, unsigned int options );
@@ -1878,9 +1878,9 @@ index c3e7bf57e92..52448985632 100644
      console->fd            = NULL;
      console->last_id       = 0;
 +    console->inproc_sync   = NULL;
-     init_async_queue( &console->ioctl_q );
-     init_async_queue( &console->read_q );
- 
+     list_init( &console->screen_buffers );
+     list_init( &console->inputs );
+     list_init( &console->outputs );
 @@ -578,6 +593,7 @@ static int queue_host_ioctl( struct console_server *server, unsigned int code, u
      }
      list_add_tail( &server->queue, &ioctl->entry );
@@ -2024,9 +2024,10 @@ index c3e7bf57e92..52448985632 100644
          server->console->signaled = 1;
          wake_up( &server->console->obj, 0 );
 +        set_inproc_event( server->console->inproc_sync );
-     }
- 
-     if (req->read)
+         LIST_FOR_EACH_ENTRY( screen_buffer, &server->console->screen_buffers, struct screen_buffer, entry )
+             wake_up( &screen_buffer->obj, 0 );
+         LIST_FOR_EACH_ENTRY( input, &server->console->inputs, struct console_input, entry )
+             wake_up( &input->obj, 0 );
 @@ -1569,6 +1647,8 @@ DECL_HANDLER(get_next_console_request)
          /* set result of previous ioctl */
          ioctl = LIST_ENTRY( list_head( &server->queue ), struct console_host_ioctl, entry );
