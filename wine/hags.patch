@@ -1,0 +1,54 @@
+commit f9909690b3a0ae5a259743f5b9c55008e50eba4d
+Author: Krzysztof Bogacki <krzysztof.bogacki@leancode.pl>
+Date:   Tue Dec 19 23:57:14 2023 +0100
+
+    win32u: Allow faking HAGS in QueryAdapterInfo.
+
+diff --git a/dlls/win32u/d3dkmt.c b/dlls/win32u/d3dkmt.c
+index a6ec70d5ac4..cd1b0d5003d 100644
+--- a/dlls/win32u/d3dkmt.c
++++ b/dlls/win32u/d3dkmt.c
+@@ -29,6 +29,7 @@
+ #include "ntgdi_private.h"
+ #include "win32u_private.h"
+ #include "ntuser_private.h"
++#include "d3dkmdt.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
+ 
+@@ -327,7 +328,11 @@ NTSTATUS WINAPI NtGdiDdDDIDestroyDevice( const D3DKMT_DESTROYDEVICE *desc )
+     free( found );
+     return STATUS_SUCCESS;
+ }
+-
++static BOOL check_hags_enabled( void )
++{
++    const char *winehags = getenv( "WINEHAGS" );
++    return winehags && *winehags != '\0' && *winehags != '0';
++}
+ /******************************************************************************
+  *           NtGdiDdDDIQueryAdapterInfo    (win32u.@)
+  */
+@@ -360,6 +365,22 @@ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
+         *value = KMT_DRIVERVERSION_WDDM_1_3;
+         return STATUS_SUCCESS;
+     }
++    case KMTQAITYPE_WDDM_2_7_CAPS:
++    {
++        D3DKMT_WDDM_2_7_CAPS *value = desc->pPrivateDriverData;
++        if (desc->PrivateDriverDataSize < sizeof(*value))
++            return STATUS_INVALID_PARAMETER;
++        value->HwSchSupported = 1;
++        value->HwSchEnabled = 0;
++        value->HwSchEnabledByDefault = 0;
++        value->IndependentVidPnVSyncControl = 0;
++        if (check_hags_enabled())
++        {
++            value->HwSchEnabled = 1;
++            value->HwSchEnabledByDefault = 1;
++        }
++        return STATUS_SUCCESS;
++    }
+     default:
+     {
+         FIXME( "type %d not handled.\n", desc->Type );
