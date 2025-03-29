@@ -1,0 +1,47 @@
+# Maintainer: Giancarlo Razzolini <grazzolini@archlinux.org>
+# Contributor: Sergej Pupykin <pupykin.s+arch@gmail.com>
+# Contributor: Geoffroy Carrier <geoffroy.carrier@aur.archlinux.org>
+# Contributor: neodreams <yanbrodeur@videotron.ca>
+# Contributor: Daniel J Griffiths <ghost1227@archlinux.us>
+
+pkgname=wrestool
+_pkgname=icoutils
+pkgver=0.33.0
+pkgrel=1
+pkgdesc='Extracts resources from Microsoft Windows(R) binaries '
+arch=('x86_64')
+license=('GPL')
+url='https://www.nongnu.org/icoutils/'
+makedepends=('libpng>=1.0.0')
+depends=()
+source=("git+https://git.savannah.gnu.org/git/gnulib.git"
+        "git+https://git.savannah.gnu.org/git/icoutils.git"
+        "wrestool-add-opt-first.patch")
+sha256sums=('SKIP'
+            'SKIP'
+            '60b387befe087dff0d7afc899de37a7ce9ebfae8c4fff446e62910e8')
+
+prepare(){
+  cd ${_pkgname}
+  git checkout build-cmake
+  patch -Np1 <"../wrestool-add-opt-first.patch"
+}
+
+build() {
+  cd ${_pkgname}
+  ./bootstrap # Update autoconf, gnulib; bootstrapped build system
+  ./configure \
+    --prefix=/usr \
+    --mandir=/usr/share/man
+  make
+}
+
+package() {
+  cd ${_pkgname}
+  make DESTDIR="$pkgdir" install
+
+  rm -rf "$pkgdir/usr/share/locale"
+  rm -f "$pkgdir/usr/share/man/man1/"{icotool.1,genresscript.1,extresso.1}
+  rm -f "$pkgdir/usr/bin/"{icotool,genresscript,extresso}
+}
+

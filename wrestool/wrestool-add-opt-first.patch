@@ -1,0 +1,114 @@
+commit a6b23e71838fe26d5ad50267e839fedb6eef0a12
+Author: Zebra2711 <zebra2711@users.noreply.github.com>
+Date:   Sat Mar 29 16:08:12 2025 +0700
+
+    wrestool: use --first to extract one resource only
+
+diff --git a/wrestool/main.c b/wrestool/main.c
+index b2ad8ae..b603d76 100644
+--- a/wrestool/main.c
++++ b/wrestool/main.c
+@@ -45,6 +45,7 @@ enum {
+ 
+ const char version_etc_copyright[] = "Copyright (C) 1998 Oskar Liljeblad";
+ bool arg_raw;
++bool arg_first;
+ static FILE *verbose_file;
+ static int arg_verbosity;
+ static const char *arg_output;
+@@ -193,6 +194,7 @@ display_help(void)
+     printf(_("\nMiscellaneous:\n"));
+     printf(_("  -o, --output=PATH       where to place extracted files\n"));
+     printf(_("  -R, --raw               do not parse resource contents\n"));
++    printf(_("  -F, --first             extract one resource only\n"));
+     printf(_("  -v, --verbose           explain what is being done\n"));
+     printf(_("      --help              display this help and exit\n"));
+     printf(_("      --version           output version information and exit\n"));
+@@ -209,6 +211,7 @@ main (int argc, char **argv)
+     arg_type = arg_name = arg_language = NULL;
+     arg_verbosity = 0;
+     arg_raw = false;
++    arg_first = false;
+     arg_action = ACTION_LIST;
+ 
+ #ifdef ENABLE_NLS
+@@ -232,6 +235,7 @@ main (int argc, char **argv)
+             { "output",     required_argument,  NULL, 'o' },
+             { "all",		no_argument,		NULL, 'a' },
+             { "raw",        no_argument,        NULL, 'R' },
++            { "first",      no_argument,        NULL, 'F' },
+             { "extract",	no_argument,		NULL, 'x' },
+             { "list",		no_argument,		NULL, 'l' },
+             { "verbose",	no_argument,		NULL, 'v' },
+@@ -239,7 +243,7 @@ main (int argc, char **argv)
+             { "help",		no_argument,		NULL, OPT_HELP },
+             { 0, 0, 0, 0 }
+         };
+-        c = getopt_long (argc, argv, "t:n:L:o:aRxlv", long_options, &option_index);
++        c = getopt_long (argc, argv, "t:n:L:o:aRFxlv", long_options, &option_index);
+         if (c == EOF)
+             break;
+ 
+@@ -249,6 +253,7 @@ main (int argc, char **argv)
+             case 'L': arg_language = optarg; break;
+             case 'a': arg_type = arg_name = arg_language = NULL; break;
+             case 'R': arg_raw = true; break;
++            case 'F': arg_first = true; break;
+             case 'x': arg_action = ACTION_EXTRACT; break;
+             case 'l': arg_action = ACTION_LIST; break;
+             case 'v': arg_verbosity++; break;
+diff --git a/wrestool/restable.c b/wrestool/restable.c
+index ce7c48a..13d7286 100644
+--- a/wrestool/restable.c
++++ b/wrestool/restable.c
+@@ -42,6 +42,8 @@ static WinResource *find_with_resource_array(WinLibrary *, WinResource *, const
+ static WinResource *list_resources (WinLibrary *fi, WinResource *res, int *count);
+ static bool compare_resource_id (WinResource *wr, const char *id);
+ 
++bool first = false;
++
+ /* Check whether access to a PE_SECTIONS is allowed */
+ #define RETURN_IF_BAD_PE_SECTIONS(ret, module)                                              \
+     do {                                                                                    \
+@@ -72,6 +74,8 @@ do_resources (WinLibrary *fi, const char *type, const char *name, const char *la
+     do_resources_recurs(fi, NULL, type_wr, name_wr, lang_wr, type, name, lang, cb);
+ 
+     free(type_wr);
++
++    if (!first) die(_("%s: NO_FILES_EXTRACTED"),name);
+ }
+ 
+ /* what is each entry in this directory level for? type, name or language? */
+@@ -88,6 +92,9 @@ do_resources_recurs (WinLibrary *fi, WinResource *base, WinResource *type_wr,
+     int c, rescnt;
+     WinResource *wr;
+ 
++    /* extract one resource only */
++    if (arg_first && first) return;
++
+     /* get a list of all resources at this level */
+     wr = list_resources (fi, base, &rescnt);
+     if (wr == NULL)
+@@ -109,7 +116,10 @@ do_resources_recurs (WinLibrary *fi, WinResource *base, WinResource *type_wr,
+             if (wr->is_directory)
+                 do_resources_recurs (fi, wr+c, type_wr, name_wr, lang_wr, type, name, lang, cb);
+             else
++            {
+                 cb(fi, wr+c, type_wr, name_wr, lang_wr);
++                first = true;
++            }
+         }
+     }
+ 
+diff --git a/wrestool/wrestool.h b/wrestool/wrestool.h
+index a3543a3..143c0c6 100644
+--- a/wrestool/wrestool.h
++++ b/wrestool/wrestool.h
+@@ -39,6 +39,7 @@
+ 
+ extern char *prgname;
+ extern bool arg_raw;
++extern bool arg_first;
+ 
+ /*
+  * Structures 
