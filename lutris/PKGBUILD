@@ -49,7 +49,7 @@ makedepends=(
   ninja
   protobuf
   python-poetry-core
-  icoutils
+  #icoutils
 )
 checkdepends=(
   python-nose
@@ -68,6 +68,7 @@ optdepends=(
   'lib32-gamemode: Allows games to request a temporary set of optimisations'
   'lib32-vkd3d: DirectX 12 support'
   'lib32-vulkan-icd-loader: Vulkan support'
+  'python-pefile: Display icons of Microsoft executable files'
   'python-protobuf: Battle.net support'
   'vkd3d: DirectX 12 support'
   'vulkan-icd-loader: Vulkan support'
@@ -113,5 +114,5 @@ package() {
   # Remove Python cache files and directories
   find "$pkgdir" -type d -name "__pycache__" -delete 2>/dev/null || true
   find "$pkgdir" -name "*.pyc" -delete
-  cp -vf /usr/bin/wrestool "${pkgdir}/usr/bin/wrestool"
+  #cp -vf /usr/bin/wrestool "${pkgdir}/usr/bin/wrestool"
 }
