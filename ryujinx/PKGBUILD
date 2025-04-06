@@ -1,0 +1,132 @@
+# Maintainer:zebra2711
+
+# Recoment build BUILD_FROM_SOURCE=0
+BUILD_FROM_SOURCE=1
+
+_pkgname="ryujinx"
+pkgname="ryujinx"
+pkgver=1.2.86 # stable build
+
+if [[ "$BUILD_FROM_SOURCE" -eq "1" ]]; then
+  pkgname="ryujinx-bin"
+  pkgver=1.3.29 # cavary build
+fi
+
+pkgrel=1
+pkgdesc="Experimental Nintendo Switch Emulator written in C#"
+url="https://git.ryujinx.app/ryubing/ryujinx"
+license=('MIT')
+arch=('x86_64')
+conflicts=('ryujinx' 'ryujinx-git' 'ryujinx-canary')
+
+depends=(
+  'alsa-lib'
+  'fontconfig'
+  'jack'
+  'libpulse'
+  'libx11'
+  'wayland'
+)
+makedepends=()
+
+options=('!strip' '!debug')
+
+source=()
+sha256sums=()
+
+if [[ "$BUILD_FROM_SOURCE" -eq "1" ]]; then
+  makedepends+=(
+    "dotnet-sdk${_dotnet_type:-}"
+    'desktop-file-utils'
+  )
+  _commit=adae465b080a43b15fd0ef542ad9ef2ec84e538c
+  source+=("git+$url.git#commit=${_commit}")
+  sha256sums=('SKIP')
+elif [[ "$BUILD_FROM_SOURCE" -eq "0" ]]; then
+  source+=( "https://github.com/Ryubing/Stable-Releases/releases/download/1.2.86/$_pkgname-$pkgver-linux_x64.tar.gz"
+            "ryujinx.desktop::https://git.ryujinx.app/ryubing/ryujinx/-/raw/master/distribution/linux/Ryujinx.desktop?ref_type=heads"
+            "ryujinx.svg::https://git.ryujinx.app/ryubing/ryujinx/-/raw/master/distribution/misc/Logo.svg?ref_type=heads"
+  )
+  sha256sums+=('cf9b5c903e1fbb53fb4476f78355cc82f426718b490fcf14d90394d7685c8aa5'
+               'a19dc6e539931df63d4813f787c51f460cf72e0c44b20add1c0c6ef56c47d840'
+               '6d8329413c64e2eb8a1706d2cf97e89fc5083b0654468bd6feefe47e61faaad2')
+fi
+
+
+build() (
+  if [[ "$BUILD_FROM_SOURCE" -eq "1" ]]; then
+    sudo dotnet workload update
+    export HOME="$SRCDEST/nuget-home"
+    export DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+    local _args=(
+      -c Release
+      -r linux-x64
+      --disable-build-servers
+      --nologo
+      --self-contained true
+      -p:DebugType=none
+      -p:ExtraDefineConstants=DISABLE_UPDATER
+      -p:PublishSingleFile=true
+      -p:Version="${pkgver%%.[A-Za-z]*}"
+    )
+
+    echo "Building AVA Interface..."
+    dotnet publish "${_args[@]}" -o publish "$_pkgname/src/Ryujinx"
+
+    echo "Shutting down dotnet build server in background."
+    (timeout -k 45 30 dotnet build-server shutdown) > /dev/null 2>&1 &
+  fi
+)
+
+package() {
+  # Create directories
+  install -dm755 "$pkgdir/usr/lib/ryujinx"
+  install -dm755 "$pkgdir/usr/share/doc/ryujinx"
+  
+  if [[ "$BUILD_FROM_SOURCE" -eq "1" ]]; then
+    install -Dm644 "$srcdir"/ryujinx/distribution/linux/Ryujinx.desktop "$pkgdir/usr/share/applications/ryujinx.desktop"
+    install -Dm644 "$srcdir"/ryujinx/distribution/misc/Logo.svg "$pkgdir/usr/share/pixmaps/ryujinx.svg"
+  elif [[ "$BUILD_FROM_SOURCE" -eq "0" ]]; then
+    install -Dm644 "$srcdir"/ryujinx.desktop "$pkgdir/usr/share/applications/ryujinx.desktop"
+    install -Dm644 "$srcdir"/ryujinx.svg "$pkgdir/usr/share/pixmaps/ryujinx.svg"
+  fi
+
+  # Libraries and binary
+  cd "$srcdir/publish"
+  install -Dm755 Ryujinx "$pkgdir/usr/lib/ryujinx/"
+  install -Dm755 Ryujinx.sh "$pkgdir/usr/lib/ryujinx/"
+  
+  # Install libraries
+  for lib in *.so *.so.* *.dylib; do
+    if [ -f "$lib" ]; then
+      install -Dm644 "$lib" "$pkgdir/usr/lib/ryujinx/"
+    fi
+  done
+  
+  # Config files
+  install -Dm644 Ryujinx.SDL2.Common.dll.config "$pkgdir/usr/lib/ryujinx/"
+  
+  # Documentation
+  install -Dm644 THIRDPARTY.md "$pkgdir/usr/share/doc/ryujinx/"
+  # license
+  install -Dm644 LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  
+  # Symlink to binary
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s "/usr/lib/ryujinx/Ryujinx" "$pkgdir/usr/bin/ryujinx"
+
+  # mimetype
+  install -Dm644 mime/Ryujinx.xml "$pkgdir/usr/share/mime/packages/ryujinx.xml"
+
+  # Fix permissions
+  find "$pkgdir" -type d -exec chmod 755 {} \;
+  find "$pkgdir" -type f -exec chmod 644 {} \;
+  chmod 755 "$pkgdir/usr/lib/ryujinx/Ryujinx"
+  chmod 755 "$pkgdir/usr/lib/ryujinx/Ryujinx.sh"
+  
+  # Fix desktop file
+  desktop-file-edit --set-key="Exec" --set-value="ryujinx %f" "$pkgdir/usr/share/applications/ryujinx.desktop"
+  desktop-file-edit --set-icon="ryujinx" "$pkgdir/usr/share/applications/ryujinx.desktop"
+}
+
