@@ -2,7 +2,7 @@
 
 NTSYNC=1
 pkgname=wine-staging-git
-pkgver=10.4.r76.ntsync.g8d40da7ffda
+pkgver=10.5.r123.ntsync.g813f921a357
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -75,35 +75,39 @@ optdepends=(
     'wine-mono'
 )
 _tkg_commit=b23227964ea3dcac210603a0a6ffd3ca91d3e10e
+_wine_commit=813f921a357fcb80f0eb01c4e3b160901182f6e5
+_staging_commit=aa0c8391eb7c7cf7e31d850150f6f2527eaffc28
 _winehq_mr=https://gitlab.winehq.org/wine/wine/-/merge_requests/
 options=('staticlibs' '!lto' '!debug')
 install="${pkgname}.install"
 provides=("wine-staging=${pkgver}" "wine=${pkgver%%.r*}" 'wine-wow64')
 conflicts=('wine' 'wine-wow64')
-source=('git+https://gitlab.winehq.org/wine/wine-staging.git'
-        'git+https://gitlab.winehq.org/wine/wine.git'
+source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_commit}"
+        "git+https://gitlab.winehq.org/wine/wine.git#commit=${_wine_commit}"
         '30-win32-aliases.conf'
         'wine-binfmt.conf'
         "git+https://github.com/Frogging-Family/wine-tkg-git.git#commit=${_tkg_commit}"
         'hags.patch'
         'wine-ntsync.patch'
+        'wine-ntsync-v2.patch'
         'wine-wmclass.patch'
         'wine-isolate_home.patch')
 
 # Merge Request (MR) Patches
 # Format: [MR_NUMBER]="Short description of the patch"
 declare -A _mr_patches=(
-    [7633]="win32u: Fixed the sign error in the conversion from FIXED to FT_Fixed"
-    [7630]="winebth.sys part 7: Introduce support for authentication/pairing"
-    [7666]="win32u: Introduce a new opengl_driver_funcs structure."
-    [7542]="ws2_32: Implement WSALookupService for Bluetooth device discovery"
-    # Add new merge requests here with their descriptions
+    [7762]="winegstreamer: Push flush event when flushing"
+    [7780]="win32u: Avoid uneeded (and sometimes harmful) RedrawWindow() calls in expose_window_surface()"
+    #[7678]="winewayland: Use system cursor shapes when possible"
+    #[9999]=""
 )
 
 # List MR pacth from wine HQ
 for mr in "${!_mr_patches[@]}"; do
     source+=("${mr}.patch::${_winehq_mr}/${mr}.patch")
 done
+
+#source+=("combolist.patch")
 
 sha256sums=('SKIP'
             'SKIP'
@@ -112,12 +116,15 @@ sha256sums=('SKIP'
             'SKIP'
             '23bd2a1254ec8a0a463bf0ee263377cc77187f56d8a3bd62d6c2b156e8222627'
             '3969475311aecc8902b69db3c231a48a8bb51ee08df4b4e0e0a6f31d196f1244'
+            '0ff4693f7f10f8471c9434ec1b6a8840939af69c8bb412732331a5f0e2d2c658'
             '6d3d18de38b2af6b3dce335b99bf8fce81fc44ad8a65119ea75eb5e102b1f17d'
             '959272d91ea6928a14ca821b2d71d543fa9043d3c00a8125f9cdbaeee6289fdb')
 #---------< source + >---------
 for mr in "${!_mr_patches[@]}"; do
         sha256sums+=('SKIP')
 done
+
+#sha256sums+=('SKIP')
 
 prepare() {
     # Allow ccache to work
@@ -145,13 +152,14 @@ prepare() {
     -W eventfd_synchronization \
     -W server-PeekMessage \
     -W server-Signal_Thread
-    #-W d3dx9_SetRawValue
 
     if [[ "$NTSYNC" -eq "1" ]]; then
       printf '%s\n' "======================NTSYNC==========================="
-      patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync.patch
+      patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync-v2.patch
       printf '%s\n' "======================================================="
     fi
+
+    #patch -Np1 -d wine -i "$srcdir"/combolist.patch
 
     _tkg_path="$srcdir"/wine-tkg-git/wine-tkg-git/wine-tkg-patches
     patch -Np1 -d wine -i "$_tkg_path"/proton/LAA/LAA-unix-staging.patch
@@ -171,7 +179,7 @@ prepare() {
         patch -Np1 -d wine -i "$srcdir/${mr}.patch"
     done
 
-    sudo -v # pause screen
+    #sudo -v # pause screen
     cd wine
     ./tools/make_requests
     ./dlls/winevulkan/make_vulkan
