@@ -1,0 +1,48 @@
+--- plasma-workspace/xembed-sni-proxy/CMakeLists.txt    2017-06-07 15:40:05.139090630 -0700
++++ plasma-workspace.new/xembed-sni-proxy/CMakeLists.txt    2017-06-07 15:38:23.591731403 -0700
+@@ -1,3 +1,45 @@
++cmake_minimum_required(VERSION 4.0.1 FATAL_ERROR)
++
++project(xembedsniproxy)
++
++set(QT_MIN_VERSION "6.7.0")
++set(KF6_MIN_VERSION "6.10.0")
++find_package(ECM ${KF6_MIN_VERSION} REQUIRED NO_MODULE)
++include(FeatureSummary)
++include(WriteBasicConfigVersionFile)
++include(GenerateExportHeader)
++set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${ECM_MODULE_PATH} ${ECM_KDE_MODULE_DIR})
++
++set(CMAKE_CXX_STANDARD 20)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++
++find_package (X11 REQUIRED)
++
++find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS
++    Core
++    DBus
++    Gui
++)
++
++include(KDEInstallDirs)
++include(KDECMakeSettings)
++include(KDECompilerSettings NO_POLICY_SCOPE)
++
++include(ECMInstallIcons)
++include(ECMOptionalAddSubdirectory)
++include(ECMQtDeclareLoggingCategory)
++include(ECMConfiguredInstall)
++
++configure_file(config-workspace.h.cmake ${CMAKE_CURRENT_BINARY_DIR}/config-workspace.h)
++
++# required frameworks by Core
++find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS
++    WindowSystem
++    DBusAddons
++    CoreAddons
++    Crash
++)
++
+ find_package(XCB
+     REQUIRED COMPONENTS
+         XCB

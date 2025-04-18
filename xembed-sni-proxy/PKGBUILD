@@ -1,0 +1,44 @@
+# Maintainer: NBonaparte <NBonaparte@protonmail.com>
+
+_pkgparent=plasma-workspace
+_pkgname=xembed-sni-proxy
+pkgname=$_pkgname-git
+pkgver=v6.2.90.r960.gfcc2677a3d
+pkgrel=1
+pkgdesc="Convert XEmbed system tray icons to SNI icons"
+arch=('i686' 'x86_64')
+url="https://github.com/KDE/plasma-workspace"
+license=('GPL')
+depends=('kwindowsystem' 'libxtst')
+makedepends=('extra-cmake-modules' 'git' 'kdbusaddons')
+conflicts=($_pkgparent)
+source=("git+${url}.git" "cmake.patch")
+sha256sums=('SKIP'
+            'SKIP')
+pkgver() {
+    cd $_pkgparent
+    git describe --long | sed 's/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare() {   
+    patch -p0 -i "$srcdir/cmake.patch"
+    cd $_pkgparent
+    cp config-workspace.h.cmake $srcdir/$_pkgparent/$_pkgname/config-workspace.h.cmake
+}
+
+build() {
+    cd $srcdir/$_pkgparent/$_pkgname
+    cmake . \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+	-DKDE_INSTALL_LIBDIR=lib \
+	-DKDE_INSTALL_LIBEXECDIR=lib \
+	-DBUILD_TESTING=OFF
+    make
+}
+
+package() {
+    cd $srcdir/$_pkgparent/$_pkgname
+    make DESTDIR=$pkgdir install
+}
+
