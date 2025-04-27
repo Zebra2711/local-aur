@@ -2,7 +2,7 @@
 
 NTSYNC=1
 pkgname=wine-staging-git
-pkgver=10.5.r123.ntsync.g813f921a357
+pkgver=10.6.r71.ntsync.gf7503d0a996
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -74,9 +74,9 @@ optdepends=(
     'wine-gecko'
     'wine-mono'
 )
-_tkg_commit=b23227964ea3dcac210603a0a6ffd3ca91d3e10e
-_wine_commit=813f921a357fcb80f0eb01c4e3b160901182f6e5
-_staging_commit=aa0c8391eb7c7cf7e31d850150f6f2527eaffc28
+_tkg_commit=7e7eefc9c6999fc54cc02535e0486e55e6e53103
+_wine_commit=f7503d0a996ae1243dd6c87b39a9143624a80465
+_staging_commit=353a8681368713270c60ad8e191519737983e585
 _winehq_mr=https://gitlab.winehq.org/wine/wine/-/merge_requests/
 options=('staticlibs' '!lto' '!debug')
 install="${pkgname}.install"
@@ -96,10 +96,15 @@ source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_c
 # Merge Request (MR) Patches
 # Format: [MR_NUMBER]="Short description of the patch"
 declare -A _mr_patches=(
-    [7762]="winegstreamer: Push flush event when flushing"
-    [7780]="win32u: Avoid uneeded (and sometimes harmful) RedrawWindow() calls in expose_window_surface()"
+    [7888]="wbemprox: Implement Win32_CacheMemory table"
+    #[7780]="win32u: Avoid uneeded (and sometimes harmful) RedrawWindow() calls in expose_window_surface()"
     #[7678]="winewayland: Use system cursor shapes when possible"
-    #[9999]=""
+    [7884]="odbc32: Fix some NULL pointer issues"
+    [6855]="server: Fix renaming file to a hardlink of itself"
+    [7650]="Add support for AF_UNIX sockets (followup)"
+    [7848]="server: Use events as a sync for several objects" 
+    [7872]="shell32: Avoid writing past end of xlpFile or lpResult in SHELL_FindExecutable()"
+    [7781]="combase: Add stub for RoOriginateErrorW"
 )
 
 # List MR pacth from wine HQ
@@ -151,7 +156,8 @@ prepare() {
     --no-autoconf \
     -W eventfd_synchronization \
     -W server-PeekMessage \
-    -W server-Signal_Thread
+    -W server-Signal_Thread \
+    -W ws2_32-af_unix
 
     if [[ "$NTSYNC" -eq "1" ]]; then
       printf '%s\n' "======================NTSYNC==========================="
