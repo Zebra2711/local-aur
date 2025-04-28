@@ -1,14 +1,11 @@
-commit fedc85816a2829920f55019a781809ba6be0bc4f
+commit 287047809666e3b36765e2956bf0a931569c1eda
 Author: Zebra2711 <zebra2711@users.noreply.github.com>
-Date:   Mon Apr 28 17:55:26 2025 +0700
+Date:   Mon Apr 28 20:08:28 2025 +0700
 
-    wine wmclass for wayland
-    
-    Allows the user to optionally set the WM_CLASS by setting an
-    environment variable WINE_WMCLASS
+    Allow user to set WM_CLASS
 
 diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
-index 8d6b73a61a9..5641c22ffd7 100644
+index 8d6b73a61a9..b5c99a2057b 100644
 --- a/dlls/winewayland.drv/wayland_surface.c
 +++ b/dlls/winewayland.drv/wayland_surface.c
 @@ -237,7 +237,7 @@ void wayland_surface_destroy(struct wayland_surface *surface)
@@ -16,24 +13,26 @@ index 8d6b73a61a9..5641c22ffd7 100644
  {
      WCHAR text[1024];
 -
-+    const char *wmclass = getenv("WINE_WMCLASS");
++    const char *wine_wmclass = getenv("WINE_WMCLASS");
      TRACE("surface=%p\n", surface);
  
      assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_TOPLEVEL);
-@@ -256,7 +256,15 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
+@@ -256,7 +256,17 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
      xdg_toplevel_add_listener(surface->xdg_toplevel, &xdg_toplevel_listener, surface->hwnd);
  
      if (process_name)
 -        xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
 +    {
-+        if  (!wmclass || *wmclass == '\0')
++        if  (!wine_wmclass || *wine_wmclass == '\0')
 +            xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
 +        else {
-+            static char _wmclass[128];
-+            lstrcpynA(_wmclass, wmclass, sizeof(_wmclass));
-+            xdg_toplevel_set_app_id(surface->xdg_toplevel, _wmclass);
++            static char window_class[128];
++            lstrcpynA(window_class, wine_wmclass, sizeof(window_class));
++            xdg_toplevel_set_app_id(surface->xdg_toplevel, window_class);
 +        }
 +    }
++    else
++        xdg_toplevel_set_app_id(surface->xdg_toplevel, "wine-none");
  
      wl_surface_commit(surface->wl_surface);
      wl_display_flush(process_wayland.wl_display);
