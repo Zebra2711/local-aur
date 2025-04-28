@@ -90,6 +90,7 @@ source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_c
         'hags.patch'
         'wine-ntsync.patch'
         'wine-ntsync-v2.patch'
+        'wine-wmclass-v2.patch'
         'wine-wmclass.patch'
         'wine-isolate_home.patch')
 
@@ -122,6 +123,7 @@ sha256sums=('SKIP'
             '23bd2a1254ec8a0a463bf0ee263377cc77187f56d8a3bd62d6c2b156e8222627'
             '3969475311aecc8902b69db3c231a48a8bb51ee08df4b4e0e0a6f31d196f1244'
             '0ff4693f7f10f8471c9434ec1b6a8840939af69c8bb412732331a5f0e2d2c658'
+            '79fb13d3b8475f2a3c52e497c0b6030e71402ba5c74f125af09a76106e60297e'
             '6d3d18de38b2af6b3dce335b99bf8fce81fc44ad8a65119ea75eb5e102b1f17d'
             '959272d91ea6928a14ca821b2d71d543fa9043d3c00a8125f9cdbaeee6289fdb')
 #---------< source + >---------
@@ -174,7 +176,8 @@ prepare() {
 
 
 
-    patch -Np1 -d wine -i "$srcdir"/wine-wmclass.patch
+    patch -Np1 -d wine -i "$srcdir"/wine-wmclass.patch # x11
+    patch -Np1 -d wine -i "$srcdir"/wine-wmclass-v2.patch # wayland wmclass
     patch -Np1 -d wine -i "$srcdir"/wine-isolate_home.patch
     patch -Np1 -d wine -i "$srcdir"/hags.patch
 
