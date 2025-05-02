@@ -2,7 +2,7 @@
 
 NTSYNC=1
 pkgname=wine-staging-git
-pkgver=10.6.r71.ntsync.gf7503d0a996
+pkgver=10.6.r146.ntsync.g524e24757be
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -75,8 +75,8 @@ optdepends=(
     'wine-mono'
 )
 _tkg_commit=7e7eefc9c6999fc54cc02535e0486e55e6e53103
-_wine_commit=f7503d0a996ae1243dd6c87b39a9143624a80465
-_staging_commit=353a8681368713270c60ad8e191519737983e585
+_wine_commit=524e24757be008dbed6946f897d41b2ef2cb381e
+_staging_commit=42a307df6790bdf84f2fd9095a4a4c169a797782
 _winehq_mr=https://gitlab.winehq.org/wine/wine/-/merge_requests/
 options=('staticlibs' '!lto' '!debug')
 install="${pkgname}.install"
@@ -89,7 +89,6 @@ source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_c
         "git+https://github.com/Frogging-Family/wine-tkg-git.git#commit=${_tkg_commit}"
         'hags.patch'
         'wine-ntsync.patch'
-        'wine-ntsync-v2.patch'
         'wine-wmclass-v2.patch'
         'wine-wmclass.patch'
         'wine-isolate_home.patch')
@@ -97,15 +96,13 @@ source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_c
 # Merge Request (MR) Patches
 # Format: [MR_NUMBER]="Short description of the patch"
 declare -A _mr_patches=(
-    [7888]="wbemprox: Implement Win32_CacheMemory table"
-    #[7780]="win32u: Avoid uneeded (and sometimes harmful) RedrawWindow() calls in expose_window_surface()"
+    [7934]="mshtml: Validate builtin host functions in IE9+ using prototype_id rather than tid where possible"
     #[7678]="winewayland: Use system cursor shapes when possible"
-    [7884]="odbc32: Fix some NULL pointer issues"
+    [7954]="msvcrt: Add truncf to the import library"
     [6855]="server: Fix renaming file to a hardlink of itself"
     [7650]="Add support for AF_UNIX sockets (followup)"
     [7848]="server: Use events as a sync for several objects" 
     [7872]="shell32: Avoid writing past end of xlpFile or lpResult in SHELL_FindExecutable()"
-    [7781]="combase: Add stub for RoOriginateErrorW"
 )
 
 # List MR pacth from wine HQ
@@ -121,8 +118,7 @@ sha256sums=('SKIP'
             '6dfdefec305024ca11f35ad7536565f5551f09119dda2028f194aee8f77077a4'
             'SKIP'
             '23bd2a1254ec8a0a463bf0ee263377cc77187f56d8a3bd62d6c2b156e8222627'
-            '3969475311aecc8902b69db3c231a48a8bb51ee08df4b4e0e0a6f31d196f1244'
-            '0ff4693f7f10f8471c9434ec1b6a8840939af69c8bb412732331a5f0e2d2c658'
+            'be5440ebea0e15cc9ae260e8c1bb536cf5e8016d9490ac165b005c89ac5dc717'
             '56ebd338e18dafe7f6ec31863293b29d60447c4ee024b553e177f1351c3050b5'
             '6d3d18de38b2af6b3dce335b99bf8fce81fc44ad8a65119ea75eb5e102b1f17d'
             '959272d91ea6928a14ca821b2d71d543fa9043d3c00a8125f9cdbaeee6289fdb')
@@ -163,7 +159,7 @@ prepare() {
 
     if [[ "$NTSYNC" -eq "1" ]]; then
       printf '%s\n' "======================NTSYNC==========================="
-      patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync-v2.patch
+      patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync.patch
       printf '%s\n' "======================================================="
     fi
 
