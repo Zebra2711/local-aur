@@ -1,0 +1,40 @@
+From e5c2f772e84b1e5fab932403dfbc0f1f8e01442b Mon Sep 17 00:00:00 2001
+From: Etaash Mathamsetty <etaash.mathamsetty@gmail.com>
+Date: Mon, 14 Apr 2025 20:24:58 -0400
+Subject: [PATCH] hack: try/catch SysAllocString pointer access
+
+---
+ dlls/oleaut32/oleaut.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/oleaut32/oleaut.c b/dlls/oleaut32/oleaut.c
+index 1ba638597f8..6e527c668f9 100644
+--- a/dlls/oleaut32/oleaut.c
++++ b/dlls/oleaut32/oleaut.c
+@@ -41,6 +41,7 @@
+ #include "oleaut32_oaidl.h"
+ 
+ #include "wine/debug.h"
++#include "wine/exception.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(ole);
+ WINE_DECLARE_DEBUG_CHANNEL(heap);
+@@ -241,8 +242,16 @@ BSTR WINAPI SysAllocString(LPCOLESTR str)
+ {
+     if (!str) return 0;
+ 
+-    /* Delegate this to the SysAllocStringLen32 method. */
+-    return SysAllocStringLen(str, lstrlenW(str));
++    __TRY
++    {
++        /* Delegate this to the SysAllocStringLen32 method. */
++        return SysAllocStringLen(str, lstrlenW(str));
++    }
++    __EXCEPT_PAGE_FAULT
++    {
++        return 0;
++    }
++    __ENDTRY
+ }
+ 
+ static inline IMalloc *get_malloc(void)

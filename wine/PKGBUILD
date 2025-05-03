@@ -1,8 +1,11 @@
 # Maintainer: Daniel Bermond <dbermond@archlinux.org>
 
-NTSYNC=1
-pkgname=wine-staging-git
-pkgver=10.6.r146.ntsync.g524e24757be
+# Configuration options - set to 1 to enable, 0 to disable
+NTSYNC=1         # Enable NTSync support
+USE_STAGING_PATCHES=0  # Enable all patches from staging-patches folder
+
+pkgname=wine-staging-tkg
+pkgver=10.7.r0.ntsync.g71c6c3dd6dc
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -74,12 +77,12 @@ optdepends=(
     'wine-gecko'
     'wine-mono'
 )
-_tkg_commit=7e7eefc9c6999fc54cc02535e0486e55e6e53103
-_wine_commit=524e24757be008dbed6946f897d41b2ef2cb381e
+_tkg_commit=8d83bdd5b502dae7f5f047436ff1f76ff6523251
+_wine_commit=71c6c3dd6dcfffc040aa5a10a825eeb8e17f6299
 _staging_commit=42a307df6790bdf84f2fd9095a4a4c169a797782
-_winehq_mr=https://gitlab.winehq.org/wine/wine/-/merge_requests/
+_winehq_mr=https://gitlab.winehq.org/wine/wine/-/merge_requests
 options=('staticlibs' '!lto' '!debug')
-install="${pkgname}.install"
+install="wine.install"
 provides=("wine-staging=${pkgver}" "wine=${pkgver%%.r*}" 'wine-wow64')
 conflicts=('wine' 'wine-wow64')
 source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_commit}"
@@ -87,31 +90,25 @@ source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_c
         '30-win32-aliases.conf'
         'wine-binfmt.conf'
         "git+https://github.com/Frogging-Family/wine-tkg-git.git#commit=${_tkg_commit}"
-        'hags.patch'
+        'wine-hags.patch'
         'wine-ntsync.patch'
-        'wine-wmclass-v2.patch'
         'wine-wmclass.patch'
         'wine-isolate_home.patch')
+
+# Patch folder where all staging patches will be stored
+_patch_dir="mr_patches"
 
 # Merge Request (MR) Patches
 # Format: [MR_NUMBER]="Short description of the patch"
 declare -A _mr_patches=(
-    [7934]="mshtml: Validate builtin host functions in IE9+ using prototype_id rather than tid where possible"
-    #[7678]="winewayland: Use system cursor shapes when possible"
-    [7954]="msvcrt: Add truncf to the import library"
     [6855]="server: Fix renaming file to a hardlink of itself"
     [7650]="Add support for AF_UNIX sockets (followup)"
     [7848]="server: Use events as a sync for several objects" 
     [7872]="shell32: Avoid writing past end of xlpFile or lpResult in SHELL_FindExecutable()"
+    #[7678]="winewayland: Use system cursor shapes when possible"
 )
 
-# List MR pacth from wine HQ
-for mr in "${!_mr_patches[@]}"; do
-    source+=("${mr}.patch::${_winehq_mr}/${mr}.patch")
-done
-
-#source+=("combolist.patch")
-
+# Create basic checksums array
 sha256sums=('SKIP'
             'SKIP'
             '9901a5ee619f24662b241672a7358364617227937d5f6d3126f70528ee5111e7'
@@ -119,20 +116,35 @@ sha256sums=('SKIP'
             'SKIP'
             '23bd2a1254ec8a0a463bf0ee263377cc77187f56d8a3bd62d6c2b156e8222627'
             'be5440ebea0e15cc9ae260e8c1bb536cf5e8016d9490ac165b005c89ac5dc717'
-            '56ebd338e18dafe7f6ec31863293b29d60447c4ee024b553e177f1351c3050b5'
-            '6d3d18de38b2af6b3dce335b99bf8fce81fc44ad8a65119ea75eb5e102b1f17d'
+            'f897dddbeeb27a020ca29eb32ddfa9a0022505aac000d7e5bb4a7053c793c665'
             '959272d91ea6928a14ca821b2d71d543fa9043d3c00a8125f9cdbaeee6289fdb')
-#---------< source + >---------
-for mr in "${!_mr_patches[@]}"; do
-        sha256sums+=('SKIP')
-done
 
-#sha256sums+=('SKIP')
+# Download MR patches and add to source array
+if [[ ${#_mr_patches[@]} -gt 0 ]]; then
+    # Create MR patches directory
+    mkdir -p "$_patch_dir"
+
+    # Add MR patches to source array
+    for mr in "${!_mr_patches[@]}"; do
+        source+=("${_patch_dir}/${mr}.patch::${_winehq_mr}/${mr}.patch")
+        sha256sums+=('SKIP')
+    done
+fi
+
+# Add all patches from staging-patches folder if enabled
+if [[ "$USE_STAGING_PATCHES" -eq 1 ]] && [[ -d "$srcdir/staging-patches" ]]; then
+    shopt -s nullglob
+    for patch_file in "$srcdir/staging-patches"/*.{mypatch,patch}; do
+        if [[ -f "$patch_file" ]]; then
+            _patch_filename=$(basename "$patch_file")
+            source+=("staging-patches/$_patch_filename")
+            sha256sums+=('SKIP')
+        fi
+    done
+    shopt -u nullglob
+fi
 
 prepare() {
-    # Allow ccache to work
-    #mv wine $pkgname
-
     # Get rid of old build dirs
     rm -rf build-{32,64}
     mkdir -p build-{32,64}
@@ -141,12 +153,6 @@ prepare() {
     printf '%s\n' '  -> Cleaning wine source code tree...'
     git -C wine reset --hard HEAD  # restore tracked files
     git -C wine clean -xdf         # delete untracked files
-
-    # change back to the wine ustream commit that this version of wine-staging is based in
-    #printf '%s\n' '  -> Changing wine HEAD to the wine-staging base commit...'
-    #git -C wine config --local advice.detachedHead false
-    #git -C wine checkout "$(wine-staging/staging/patchinstall.py --upstream-commit)"
-
 
     # apply all wine-staging patches
     printf '%s\n' '  -> Applying wine-staging patches...'
@@ -157,34 +163,52 @@ prepare() {
     -W server-Signal_Thread \
     -W ws2_32-af_unix
 
+    # Apply NTSYNC patch if enabled
     if [[ "$NTSYNC" -eq "1" ]]; then
       printf '%s\n' "======================NTSYNC==========================="
       patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync.patch
       printf '%s\n' "======================================================="
     fi
 
-    #patch -Np1 -d wine -i "$srcdir"/combolist.patch
-
+    # Apply TKG patches
     _tkg_path="$srcdir"/wine-tkg-git/wine-tkg-git/wine-tkg-patches
+    printf '%s\n' "  -> Applying TKG patches..."
     patch -Np1 -d wine -i "$_tkg_path"/proton/LAA/LAA-unix-staging.patch
     patch -Np1 -d wine -i "$_tkg_path"/proton/msvcrt_nativebuiltin/msvcrt_nativebuiltin_mainline.patch
     patch -Np1 -d wine -i "$_tkg_path"/proton/proton-win10-default/proton-win10-default.patch
 
-
-
-    patch -Np1 -d wine -i "$srcdir"/wine-wmclass.patch # x11
-    patch -Np1 -d wine -i "$srcdir"/wine-wmclass-v2.patch # wayland wmclass
+    # Apply core patches
+    printf '%s\n' "  -> Applying core patches..."
+    patch -Np1 -d wine -i "$srcdir"/wine-wmclass.patch
     patch -Np1 -d wine -i "$srcdir"/wine-isolate_home.patch
-    patch -Np1 -d wine -i "$srcdir"/hags.patch
+    patch -Np1 -d wine -i "$srcdir"/wine-hags.patch
 
-    # Test MR Patch from gitlab wineHQ
-    for mr in "${!_mr_patches[@]}"; do
-        printf '%s\n' "============================================="
-        printf '%s\n' "  -> Applying MR ${mr} patch: ${_mr_patches[${mr}]}"
-        patch -Np1 -d wine -i "$srcdir/${mr}.patch"
-    done
+    # Apply MR patches if any exist
+    if [[ ${#_mr_patches[@]} -gt 0 ]]; then
+        printf '%s\n' "  -> Applying MR patches..."
+        for mr in "${!_mr_patches[@]}"; do
+            printf '%s\n' "============================================="
+            printf '%s\n' "  -> Applying MR ${mr} patch: ${_mr_patches[${mr}]}"
+            patch -Np1 -d wine -i "$_patch_dir/${mr}.patch"
+        done
+    else
+        printf '%s\n' "  -> No MR patches to apply."
+    fi
 
-    #sudo -v # pause screen
+    # Apply all patches from staging-patches folder if enabled
+    if [[ "$USE_STAGING_PATCHES" -eq 1 ]] && [[ -d "$srcdir/staging-patches" ]]; then
+        printf '%s\n' "  -> Applying additional staging patches..."
+        shopt -s nullglob
+        for patch_file in "$srcdir/staging-patches"/*.{mypatch,patch}; do
+            if [[ -f "$patch_file" ]]; then
+                printf '%s\n' "  -> Applying $(basename "$patch_file")..."
+                patch -Np1 -d wine -i "$patch_file"
+            fi
+        done
+        shopt -u nullglob
+    fi
+
+    # Run wine build generation tools
     cd wine
     ./tools/make_requests
     ./dlls/winevulkan/make_vulkan
@@ -202,39 +226,42 @@ pkgver() {
 }
 
 build() {
-    # Doesn't compile without remove these flags as of 4.10
-    # incompatible-pointer-types: https://bugs.gentoo.org/919758
-    export CFLAGS="$CFLAGS -ffat-lto-objects -Wno-error=incompatible-pointer-types"
+    # GCC 15 specific flags and fixes
+    # Address incompatible pointer types, implicit fallthrough, and GCC 15 specific warnings
+    export CFLAGS="$CFLAGS -ffat-lto-objects -Wno-error=incompatible-pointer-types -Wno-error=implicit-fallthrough -Wno-error=maybe-uninitialized -fcommon"
+    export CXXFLAGS="$CXXFLAGS -ffat-lto-objects -Wno-error=incompatible-pointer-types -Wno-error=implicit-fallthrough -Wno-error=maybe-uninitialized -fcommon"
 
     # apply flags for cross-compilation
-    export CROSSCFLAGS="-O2 -pipe"
-    export CROSSCXXFLAGS="-O2 -pipe"
+    export CROSSCFLAGS="-O2 -pipe -fcommon"
+    export CROSSCXXFLAGS="-O2 -pipe -fcommon"
     export CROSSLDFLAGS="-Wl,-O1"
 
     local -a split=($CFLAGS)
     local -A flags
     for opt in "${split[@]}"; do flags["${opt%%=*}"]="${opt##*=}"; done
-    local march="${flags["-march"]:-nocona}"
-    local mtune="${flags["-mtune"]:-core-avx2}"
+    local march="${flags["-march"]:-znver4}"  # Updated for newer AMD CPUs
+    local mtune="${flags["-mtune"]:-znver4}"
 
-    # From Proton
+    # Optimization and compiler flags for GCC 15
     OPTIMIZE_FLAGS="-O3 -march=$march -mtune=$mtune -mfpmath=sse -pipe"
-    SANITY_FLAGS="-fwrapv -fno-strict-aliasing"
-    WARNING_FLAGS="-Wno-incompatible-pointer-types"
+    SANITY_FLAGS="-fwrapv -fno-strict-aliasing -fcommon"
+    WARNING_FLAGS="-Wno-incompatible-pointer-types -Wno-error=implicit-fallthrough -Wno-error=maybe-uninitialized"
     STRIP_FLAGS="-s"
     COMMON_FLAGS="$OPTIMIZE_FLAGS $SANITY_FLAGS $WARNING_FLAGS $STRIP_FLAGS"
 
     COMMON_LDFLAGS="-Wl,-O1,--sort-common,--as-needed"
 
-    export LDFLAGS="$COMMON_LDFLAGS $LTO_LDFLAGS"
+    export LDFLAGS="$COMMON_LDFLAGS"
     export CROSSLDFLAGS="$COMMON_LDFLAGS -Wl,--file-alignment,4096"
 
+    # Build in parallel using all available CPU cores
+    export MAKEFLAGS="-j$(nproc)"
 
     # build wine-staging 64-bit
     # (according to the wine wiki, this 64-bit/32-bit building order is mandatory)
     printf '%s\n' '  -> Building wine-staging-64...'
-    export CFLAGS="$COMMON_FLAGS -mcmodel=small $LTO_CFLAGS"
-    export CXXFLAGS="$COMMON_FLAGS -mcmodel=small -std=c++17 $LTO_CFLAGS"
+    export CFLAGS="$COMMON_FLAGS -mcmodel=small"
+    export CXXFLAGS="$COMMON_FLAGS -mcmodel=small -std=c++17"
     export CROSSCFLAGS="$COMMON_FLAGS -mcmodel=small"
     export CROSSCXXFLAGS="$COMMON_FLAGS -mcmodel=small -std=c++17"
     export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig"
@@ -256,13 +283,12 @@ build() {
 
     # build wine-staging 32-bit
     printf '%s\n' '  -> Building wine-staging-32...'
-    export CFLAGS="$COMMON_FLAGS -mstackrealign $LTO_CFLAGS"
-    export CXXFLAGS="$COMMON_FLAGS -mstackrealign -std=c++17 $LTO_CFLAGS"
+    export CFLAGS="$COMMON_FLAGS -mstackrealign"
+    export CXXFLAGS="$COMMON_FLAGS -mstackrealign -std=c++17"
     export CROSSCFLAGS="$COMMON_FLAGS -mstackrealign"
     export CROSSCXXFLAGS="$COMMON_FLAGS -mstackrealign -std=c++17"
     export PKG_CONFIG_PATH="/usr/lib32/pkgconfig:/usr/share/pkgconfig"
     cd "${srcdir}/build-32"
-    export PKG_CONFIG_PATH='/usr/lib32/pkgconfig'
     ../wine/configure \
         --prefix='/usr' \
         --libdir='/usr/lib' \
@@ -281,7 +307,7 @@ build() {
 
 package() {
     # package wine-staging 32-bit
-    #(according to the wine wiki, this reverse 32-bit/64-bit packaging order is important)
+    # (according to the wine wiki, this reverse 32-bit/64-bit packaging order is important)
     printf '%s\n' '  -> Packaging wine-staging-32...'
     cd "${srcdir}/build-32"
     make prefix="${pkgdir}/usr" \
@@ -308,6 +334,6 @@ package() {
     # strip native PE libraries
     i686-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib/wine/i386-windows"/*.{dll,exe}
     x86_64-w64-mingw32-strip --strip-unneeded "${pkgdir}/usr/lib/wine/x86_64-windows"/*.{dll,exe}
-
 }
-# vim:set ts=8 sts=2 sw=2 et:
+
+# vim:set ts=4 sts=4 sw=4 et:

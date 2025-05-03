@@ -1,24 +1,62 @@
+commit 287047809666e3b36765e2956bf0a931569c1eda
+Author: Zebra2711 <zebra2711@users.noreply.github.com>
+Date:   Mon Apr 28 20:08:28 2025 +0700
+
+    Allow user to set WM_CLASS
+
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index 8d6b73a61a9..b5c99a2057b 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -237,7 +237,7 @@ void wayland_surface_destroy(struct wayland_surface *surface)
+ void wayland_surface_make_toplevel(struct wayland_surface *surface)
+ {
+     WCHAR text[1024];
+-
++    const char *wine_wmclass = getenv("WINE_WMCLASS");
+     TRACE("surface=%p\n", surface);
+ 
+     assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_TOPLEVEL);
+@@ -256,7 +256,17 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
+     xdg_toplevel_add_listener(surface->xdg_toplevel, &xdg_toplevel_listener, surface->hwnd);
+ 
+     if (process_name)
+-        xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
++    {
++        if  (!wine_wmclass || *wine_wmclass == '\0')
++            xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
++        else {
++            static char window_class[128];
++            lstrcpynA(window_class, wine_wmclass, sizeof(window_class));
++            xdg_toplevel_set_app_id(surface->xdg_toplevel, window_class);
++        }
++    }
++    else
++        xdg_toplevel_set_app_id(surface->xdg_toplevel, "wine-none");
+ 
+     wl_surface_commit(surface->wl_surface);
+     wl_display_flush(process_wayland.wl_display);
 diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
-index 221f4392aa9..5485eb0f8e8 100644
+index 47261734119..2769f599ae7 100644
 --- a/dlls/winex11.drv/window.c
 +++ b/dlls/winex11.drv/window.c
-@@ -1034,8 +1034,17 @@ static void set_initial_wm_hints( Display *display, Window window )
+@@ -1031,8 +1031,17 @@ static void set_initial_wm_hints( Display *display, Window window )
      /* class hints */
      if ((class_hints = XAllocClassHint()))
      {
 -        class_hints->res_name = process_name;
 -        class_hints->res_class = process_name;
 +        const char *wine_wmclass = getenv("WINE_WMCLASS");
-+        char window_class[128];
 +
-+        if (wine_wmclass && *wine_wmclass){
-+            snprintf(window_class, sizeof(window_class), "%s", wine_wmclass);
++        if (wine_wmclass && *wine_wmclass != '\0')
++        {
++            static char window_class[128];
++            lstrcpynA(window_class, wine_wmclass, sizeof(window_class));
 +            class_hints->res_name = window_class;
-+            class_hints->res_class = window_class;
-+        } else {
-+            class_hints->res_name = process_name;
-+            class_hints->res_class = process_name;
 +        }
++        else
++            class_hints->res_name = process_name;
++        class_hints->res_class = class_hints->res_name;
          XSetClassHint( display, window, class_hints );
          XFree( class_hints );
      }
