@@ -100,7 +100,7 @@ _patch_dir="mr_patches"
 
 # Merge Request (MR) Patches
 # Format: [MR_NUMBER]="Short description of the patch"
-declare -A _mr_patches=(
+declare -gA _mr_patches=(
     [6855]="server: Fix renaming file to a hardlink of itself"
     [7650]="Add support for AF_UNIX sockets (followup)"
     [7848]="server: Use events as a sync for several objects" 
