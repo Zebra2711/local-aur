@@ -13,7 +13,7 @@ WITH_DARK_ICON=0
 PARALLEL_JOBS=$(nproc)
 
 pkgname=octopi-git
-pkgver=0.17.0.r7.fb46f9ac
+pkgver=0.17.0.r10.48fc54d2
 pkgrel=1
 pkgdesc="This is Octopi, a powerful Pacman frontend using Qt libs"
 arch=('x86_64')
