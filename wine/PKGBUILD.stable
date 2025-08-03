@@ -5,7 +5,7 @@ NTSYNC=1         # Enable NTSync support
 USE_STAGING_PATCHES=0  # Enable all patches from staging-patches folder
 
 pkgname=wine-staging-tkg
-pkgver=10.10.r149.ntsync.ga130bcc6775
+pkgver=10.10.r43.ntsync.g5d091af63a2
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -78,8 +78,8 @@ optdepends=(
     'wine-mono'
 )
 _tkg_commit=8d83bdd5b502dae7f5f047436ff1f76ff6523251
-_wine_commit=a130bcc677581735b56de538b0878bea788c590a
-_staging_commit=7db26cf72773c616ee216e0bbe46e81de5a4cc3d
+_wine_commit=5d091af63a231cbeb348148408bc7a203e34c0ea
+_staging_commit=a0441666519aaf7b98e71c682488d5a02cc37de3
 _winehq_mr=https://gitlab.winehq.org/wine/wine/-/merge_requests
 options=('staticlibs' '!lto' '!debug')
 install="wine.install"
@@ -91,12 +91,11 @@ source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_c
         'wine-binfmt.conf'
         "git+https://github.com/Frogging-Family/wine-tkg-git.git#commit=${_tkg_commit}"
         'wine-hags.patch'
-        'wine-ntsync.patch'
+        'wine-ntsync-stable.patch'
         'wine-wmclass.patch'
         'wine-isolate_home.patch')
 
 # Merge Request (MR) Patches
-# Format: [MR_NUMBER]="Short description of the patch"
 declare -gA _mr_patches=(
     [8126]="xaudio2: Do not register classes from xapofx or x3daudio dlls"
     [8172]="mfreadwrite: Fix media type output when video processor is used"
@@ -104,7 +103,6 @@ declare -gA _mr_patches=(
     [8282]="winegstreamer: Don't hold lock during wg_parser_stream_get_buffer"
     [8362]="mfmediaengine: Enable XVP for playback topology"
     [8392]="opengl32: Ignore RGB565 pixel formats with memory DCs"
-    [8399]="win32u: Use the right pointer when destroying window"
     [8409]="mfreadwrite: Fix media type output when video processor is used"
     [8424]="user32: Add GetPointerDeviceProperties stub"
     [8441]="kernelbase: Fix array underflow when checking for trailing spaces"
@@ -173,13 +171,14 @@ prepare() {
     printf '%s\n' '  -> Applying wine-staging patches...'
     wine-staging/staging/patchinstall.py DESTDIR="${srcdir}/wine" --all \
     --no-autoconf \
+    -W eventfd_synchronization \
     -W server-PeekMessage \
     -W server-Signal_Thread
     read -s
     # Apply NTSYNC patch if enabled
     if [[ "$NTSYNC" -eq "1" ]]; then
       printf '%s\n' "======================NTSYNC==========================="
-      patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync.patch
+      patch -Np1 --verbose -d wine -i "$srcdir"/wine-ntsync-stable.patch
       printf '%s\n' "======================================================="
     fi
 
@@ -257,7 +256,7 @@ build() {
     local mtune="${flags["-mtune"]:-znver4}"
 
     # Optimization and compiler flags for GCC 15
-    OPTIMIZE_FLAGS="-O3 -march=$march -mtune=$mtune -mfpmath=sse -pipe"
+    OPTIMIZE_FLAGS="-O2 -march=$march -mtune=$mtune -mfpmath=sse -pipe"
     SANITY_FLAGS="-fwrapv -fno-strict-aliasing -fcommon"
     WARNING_FLAGS="-Wno-incompatible-pointer-types -Wno-error=implicit-fallthrough -Wno-error=maybe-uninitialized"
     STRIP_FLAGS="-s"
