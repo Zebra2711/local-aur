@@ -5,7 +5,7 @@ NTSYNC=1         # Enable NTSync support
 USE_STAGING_PATCHES=0  # Enable all patches from staging-patches folder
 
 pkgname=wine-staging-tkg
-pkgver=10.7.r0.ntsync.g71c6c3dd6dc
+pkgver=10.10.r43.ntsync.g5d091af63a2
 pkgrel=1
 pkgdesc='A compatibility layer for running Windows programs (staging branch, git version)'
 arch=('x86_64')
@@ -78,8 +78,8 @@ optdepends=(
     'wine-mono'
 )
 _tkg_commit=8d83bdd5b502dae7f5f047436ff1f76ff6523251
-_wine_commit=71c6c3dd6dcfffc040aa5a10a825eeb8e17f6299
-_staging_commit=42a307df6790bdf84f2fd9095a4a4c169a797782
+_wine_commit=73b75afe55144727775e8a865f82ed843c19b3bb
+_staging_commit=5cc4d9033335915f87f0cf2a91637c4312969395
 _winehq_mr=https://gitlab.winehq.org/wine/wine/-/merge_requests
 options=('staticlibs' '!lto' '!debug')
 install="wine.install"
@@ -95,17 +95,30 @@ source=("git+https://gitlab.winehq.org/wine/wine-staging.git#commit=${_staging_c
         'wine-wmclass.patch'
         'wine-isolate_home.patch')
 
-# Patch folder where all staging patches will be stored
-_patch_dir="mr_patches"
-
 # Merge Request (MR) Patches
 # Format: [MR_NUMBER]="Short description of the patch"
 declare -gA _mr_patches=(
-    [6855]="server: Fix renaming file to a hardlink of itself"
-    [7650]="Add support for AF_UNIX sockets (followup)"
-    [7848]="server: Use events as a sync for several objects" 
-    [7872]="shell32: Avoid writing past end of xlpFile or lpResult in SHELL_FindExecutable()"
-    #[7678]="winewayland: Use system cursor shapes when possible"
+    #[8455]="kernel32: Update len in the absolute path case"
+    [8126]="xaudio2: Do not register classes from xapofx or x3daudio dlls"
+    [8172]="mfreadwrite: Fix media type output when video processor is used"
+    [8184]="mf: Handle thinning in media session"
+    [8282]="winegstreamer: Don't hold lock during wg_parser_stream_get_buffer"
+    #[8329]="comctl32: Implement MSAA events for updown controls"
+    #[8336]="win32u: Introduce an opengl_drawable base struct"
+    #[8339]="oleaut32: In VarFormat do not count '#' in exponent into fractional digits"
+    #[8344]="gdi32: Fix missing terminator element in Devanagari_consonants"
+    #[8348]="wintrust: Fix data length mix-up in asn decoder"
+    #[8349]="msvcrt: Fix allocated buffer size in _getcwd"
+    [8350]="crypt32: Handle missing attributes in CDecodeSignedMsg_GetParam"
+    #[8351]="bluetoothapis: Fix typo in a format string (Coverity)"
+    [8362]="mfmediaengine: Enable XVP for playback topology"
+    [8493]="winegstreamer: Remove 'au' alignment for h264"
+    [8495]="winepulse.drv: Avoid hangs on exit when pulse main loop thread gets killed"
+    [8512]="shell32: Avoid closing a handle twice"
+    [8514]="winewayland: Support layered windows with per-pixel alpha"
+    [8527]="winegstreamer: Fix some video decoder media type leaks"
+    [8532]="winegstreamer: Force h264parse to output 'au' aligned byte-stream"
+    [8639]="rpcrt4: Don't read past the end of params in client_do_args"
 )
 
 # Create basic checksums array
@@ -115,18 +128,19 @@ sha256sums=('SKIP'
             '6dfdefec305024ca11f35ad7536565f5551f09119dda2028f194aee8f77077a4'
             'SKIP'
             '23bd2a1254ec8a0a463bf0ee263377cc77187f56d8a3bd62d6c2b156e8222627'
-            'be5440ebea0e15cc9ae260e8c1bb536cf5e8016d9490ac165b005c89ac5dc717'
+            'SKIP'
             'f897dddbeeb27a020ca29eb32ddfa9a0022505aac000d7e5bb4a7053c793c665'
             '959272d91ea6928a14ca821b2d71d543fa9043d3c00a8125f9cdbaeee6289fdb')
 
 # Download MR patches and add to source array
 if [[ ${#_mr_patches[@]} -gt 0 ]]; then
     # Create MR patches directory
-    mkdir -p "$_patch_dir"
+    #rm -r "mr_patches"
+    mkdir -p "mr_patches"
 
     # Add MR patches to source array
     for mr in "${!_mr_patches[@]}"; do
-        source+=("${_patch_dir}/${mr}.patch::${_winehq_mr}/${mr}.patch")
+        source+=("mr_patches/${mr}.patch::${_winehq_mr}/${mr}.patch")
         sha256sums+=('SKIP')
     done
 fi
@@ -149,6 +163,9 @@ prepare() {
     rm -rf build-{32,64}
     mkdir -p build-{32,64}
 
+    ln -s ../mr_patches mr_patches
+    ln -s ../staging-patches staging-patches
+
     # restore the wine tree to its git origin state, without wine-staging patches
     printf '%s\n' '  -> Cleaning wine source code tree...'
     git -C wine reset --hard HEAD  # restore tracked files
@@ -160,9 +177,8 @@ prepare() {
     --no-autoconf \
     -W eventfd_synchronization \
     -W server-PeekMessage \
-    -W server-Signal_Thread \
-    -W ws2_32-af_unix
-
+    -W server-Signal_Thread
+    read -s
     # Apply NTSYNC patch if enabled
     if [[ "$NTSYNC" -eq "1" ]]; then
       printf '%s\n' "======================NTSYNC==========================="
@@ -189,7 +205,7 @@ prepare() {
         for mr in "${!_mr_patches[@]}"; do
             printf '%s\n' "============================================="
             printf '%s\n' "  -> Applying MR ${mr} patch: ${_mr_patches[${mr}]}"
-            patch -Np1 -d wine -i "$_patch_dir/${mr}.patch"
+            patch -Np1 -d wine -i "$srcdir/mr_patches/${mr}.patch"
         done
     else
         printf '%s\n' "  -> No MR patches to apply."
@@ -211,9 +227,10 @@ prepare() {
     # Run wine build generation tools
     cd wine
     ./tools/make_requests
-    ./dlls/winevulkan/make_vulkan
     ./tools/make_specfiles
+    ./dlls/winevulkan/make_vulkan
     autoreconf -fiv
+    rm -rf autom4te.cache
 }
 
 pkgver() {
