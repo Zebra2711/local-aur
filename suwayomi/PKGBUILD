@@ -1,0 +1,63 @@
+pkgname=suwayomi-server
+_pkgname=Suwayomi-Server
+pkgver=2.1.1922
+pkgrel=1
+pkgdesc="A free and open source manga reader that runs extensions built for Tachiyomi"
+arch=('any')
+url="https://github.com/Suwayomi/$_pkgname"
+license=('MPL2')
+depends=('java-runtime>=8' 'libc++')
+optdepends=('electron: for running in Electron')
+provides=("$pkgname" "$_pkgname")
+source=(
+  "$url-preview/releases/download/v$pkgver/$_pkgname-v$pkgver.jar"
+  "$url-preview/releases/download/v$pkgver/$_pkgname-v$pkgver-linux-assets.tar.gz"
+  "https://raw.githubusercontent.com/Suwayomi/Suwayomi-Server/refs/heads/master/scripts/resources/catch_abort.c"
+)
+noextract=("$_pkgname-v$pkgver.jar")
+sha256sums=(
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
+
+build() {
+  export JAVA_HOME="/usr/lib/jvm/default"
+  gcc -fPIC -I$JAVA_HOME/include -I$JAVA_HOME/include/linux -shared catch_abort.c -lpthread -o catch_abort.so
+}
+
+package() {
+  local jar="$_pkgname-v$pkgver.jar"
+  local assets_dir="$_pkgname-v$pkgver-linux-assets"
+
+  install -Dm644 "$srcdir/catch_abort.so" "$pkgdir/usr/share/java/$pkgname/bin/catch_abort.so"
+  install -Dm644 "$srcdir/$jar" "$pkgdir/usr/share/java/$pkgname/bin/$_pkgname.jar"
+  cd "$srcdir/$assets_dir"
+
+  # Java + configuration
+  install -Dm644 Suwayomi-Launcher.jar "$pkgdir/usr/share/java/$pkgname/Suwayomi-Launcher.jar"
+  install -Dm644 "$pkgname.conf" "$pkgdir/etc/suwayomi/server.conf"
+
+  # Systemd + user management
+  install -Dm644 "$pkgname.service" "$pkgdir/usr/lib/systemd/system/$pkgname.service"
+  install -Dm644 "$pkgname.sysusers" "$pkgdir/usr/lib/sysusers.d/$pkgname.conf"
+  install -Dm644 "$pkgname.tmpfiles" "$pkgdir/usr/lib/tmpfiles.d/$pkgname.conf"
+
+  # Desktop integration
+  install -Dm644 "$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 suwayomi-launcher.desktop "$pkgdir/usr/share/applications/suwayomi-launcher.desktop"
+  install -Dm644 "$pkgname.png" "$pkgdir/usr/share/pixmaps/$pkgname.png"
+
+  # Binaries
+  install -Dm755 suwayomi-launcher.sh "$pkgdir/usr/bin/suwayomi-launcher"
+  # Force run with electron
+  sed -i '/else/,/fi/ {
+  /exec \/usr\/bin\/java/ {
+    s|exec /usr/bin/java "\$@" -jar|exec /usr/bin/java "$@" \\\
+       -Dsuwayomi.tachidesk.config.server.webUIInterface=electron \\\
+       -Dsuwayomi.tachidesk.config.server.electronPath=/usr/bin/electron \\\
+       -jar|
+  }
+}' "$pkgname.sh"
+  install -Dm755 "$pkgname.sh" "$pkgdir/usr/bin/$pkgname"
+}
