@@ -1,11 +1,13 @@
 pkgname=suwayomi-server
 _pkgname=Suwayomi-Server
-pkgver=2.1.1922
+# Get the latest release tag from GitHub API
+pkgver=$(curl -s "https://api.github.com/repos/Suwayomi/${_pkgname}-preview/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
 pkgrel=1
 pkgdesc="A free and open source manga reader that runs extensions built for Tachiyomi"
 arch=('any')
 url="https://github.com/Suwayomi/$_pkgname"
 license=('MPL2')
+makedepends=('curl' 'jq')
 depends=('java-runtime>=8' 'libc++')
 optdepends=('electron: for running in Electron')
 provides=("$pkgname" "$_pkgname")
