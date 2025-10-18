@@ -1,0 +1,126 @@
+# Maintainer: Andrej Benz <hello[at]benz[dot]dev>
+# Contributor: Zebra2711 <zebra2711t@gmail.com>
+pkgbase=elephant
+pkgname=(
+	 elephant
+	 elephant-archlinuxpkgs
+	 elephant-bluetooth
+	 elephant-calc
+	 elephant-clipboard
+	 elephant-desktopapplications
+	 elephant-providerlist
+	 elephant-symbols
+	 elephant-runner
+	 elephant-files
+	 elephant-todo
+	 elephant-unicode
+	 elephant-websearch
+	 elephant-menus
+)
+pkgver=2.2.2
+pkgrel=1
+pkgdesc='general purpose datasource and executor'
+url='https://github.com/abenz1267/elephant'
+arch=('x86_64')
+license=('GPL')
+makedepends=('go')
+source=("${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+		# Optimizes for Intel 11th gen (and AMD Zen 3+)
+		export GOAMD64=v3
+
+    cd ${srcdir}/${pkgbase}-${pkgver}/cmd/elephant
+    go build -buildvcs=false -x -o elephant -trimpath
+
+
+		for pkg in "${pkgname[@]}"; do
+        if [[ "$pkg" != "elephant" ]]; then
+            provider=${pkg#elephant-}
+            cd ${srcdir}/${pkgbase}-${pkgver}/internal/providers/${provider}
+            go build -buildvcs=false -buildmode=plugin -trimpath
+        fi
+    done
+}
+
+package_elephant() {
+		cd ${pkgbase}-${pkgver}
+    install -Dm 755 cmd/elephant/elephant -t "${pkgdir}/usr/bin"
+    install -Dm 644 LICENSE -t "${pkgdir}/usr/share/licenses/${pkgname}"
+}
+
+
+package_elephant-archlinuxpkgs() {
+    pkgdesc='archlinux packages provider for elephant'
+    _install_provider archlinuxpkgs
+}
+
+package_elephant-bluetooth() {
+    pkgdesc='bluetooth provider for elephant'
+    _install_provider bluetooth
+}
+
+package_elephant-calc() {
+    pkgdesc='calc provider for elephant'
+    depends=('libqalculate')
+    _install_provider calc
+}
+
+package_elephant-clipboard() {
+    pkgdesc='clipboard provider for elephant'
+    depends=('wl-clipboard')
+    _install_provider clipboard
+}
+
+package_elephant-desktopapplications() {
+    pkgdesc='desktop applications provider for elephant'
+    _install_provider desktopapplications
+}
+
+package_elephant-providerlist() {
+    pkgdesc='provider list provider for elephant'
+    _install_provider providerlist
+}
+
+package_elephant-symbols() {
+    pkgdesc='symbols provider for elephant'
+    _install_provider symbols
+}
+
+package_elephant-runner() {
+    pkgdesc='runner provider for elephant'
+    _install_provider runner
+}
+
+package_elephant-files() {
+    pkgdesc='files provider for elephant'
+		depends=('fd')
+    _install_provider files
+}
+
+package_elephant-todo() {
+    pkgdesc='todo provider for elephant'
+    _install_provider todo
+}
+
+package_elephant-unicode() {
+    pkgdesc='unicode provider for elephant'
+    _install_provider unicode
+}
+
+package_elephant-websearch() {
+    pkgdesc='web search provider for elephant'
+    _install_provider websearch
+}
+
+package_elephant-menus() {
+    pkgdesc='menus provider for elephant'
+    _install_provider menus
+}
+
+_install_provider() {
+    cd ${pkgbase}-${pkgver}
+    install -Dm 755 internal/providers/$1/$1.so -t "${pkgdir}/etc/xdg/elephant/providers"
+    install -Dm 644 LICENSE -t "${pkgdir}/usr/share/licenses/${pkgname}"
+}
