@@ -1,0 +1,36 @@
+pkgname=srwm
+pkgver=0.1.10.r0.g92a6674
+pkgrel=1
+pkgdesc='A fully statically linked dynamic X11 window manager written in Go, C and Lua'
+arch=('x86_64')
+license=('MIT')
+url='https://github.com/infraflakes/srwm'
+makedepends=('make' 'git' 'go')
+optdepends=('iw'
+            'xorg-xset'
+            'bc'
+            'sx')
+depends=()
+conflicts=("srwm-bin")
+source=("git+$url.git"
+        "srwm.desktop")
+sha256sums=('SKIP'
+            'ddafeae9a00e051377e1ffaea36b7a1ca3ebce55b5a2c8506ac82589caadbffa')
+pkgver() {
+    cd "$pkgname"
+    git describe --long 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare(){
+  sed 's|^Exec=.*|Exec=/usr/bin/srwm start|' srwm.desktop > srwm_nosx.desktop
+}
+
+build() {
+    cd ${pkgname}
+    make build
+}
+
+package() {
+   install -Dvm755 "${pkgname}/bin/srwm" "$pkgdir/usr/bin/srwm"
+   install -Dvm755 "srwm_nosx.desktop" "$pkgdir/usr/share/xsessions/srwm.desktop"
+}

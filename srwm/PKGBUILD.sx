@@ -1,0 +1,15 @@
+pkgname=sx
+pkgver=3.0
+pkgrel=1
+pkgdesc='A simple alternative to both xinit(1) and startx(1) for starting an Xorg server'
+arch=('x86_64')
+license=('MIT')
+url='https://github.com/Earnestly/sx'
+makedepends=('cmake' 'git')
+depends=('sh')
+source=("git+$url.git")
+sha256sums=('SKIP')
+package() {
+    cd ${pkgname}
+    make PREFIX="$pkgdir"/usr install
+}

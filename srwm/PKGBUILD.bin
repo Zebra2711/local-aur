@@ -1,0 +1,30 @@
+pkgname=srwm-bin
+pkgver=0.1.10
+pkgrel=1
+pkgdesc='A a simple alternative to both xinit(1) and startx(1) for starting an Xorg server'
+arch=('x86_64')
+license=('MIT')
+url='https://github.com/infraflakes/srwm'
+conflicts=("srwm" "sx")
+optdepends=('iw'
+            'xorg-xset'
+            'bc')
+source=("https://github.com/infraflakes/srwm/releases/download/v${pkgver}/srwm-v${pkgver}-linux-amd64"
+        "https://github.com/infraflakes/srwm/releases/download/v${pkgver}/checksum.sha256"
+        "sx.sh"
+        "srwm.desktop")
+sha256sums=('SKIP'
+            'SKIP'
+            'bb3a3c3c3fa7cae1af132ab724dd796818f7782d866936ec1fdaa436684a170e'
+            'ddafeae9a00e051377e1ffaea36b7a1ca3ebce55b5a2c8506ac82589caadbffa')
+
+prepare(){
+   sed 's|dist/||' checksum.sha256 | sha256sum -c - || exit 1
+}
+package() {
+   install -Dvm755 "sx.sh" "$pkgdir/usr/bin/sx"
+   install -Dvm755 "srwm-v${pkgver}-linux-amd64" "$pkgdir/usr/bin/srwm"
+   install -Dvm755 "srwm.desktop" "$pkgdir/usr/share/xsessions/srwm.desktop"
+}
+
+# vim:set ts=4 sts=4 sw=4 et:
