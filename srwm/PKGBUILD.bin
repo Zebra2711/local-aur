@@ -1,7 +1,7 @@
 pkgname=srwm-bin
 pkgver=0.1.10
 pkgrel=1
-pkgdesc='A a simple alternative to both xinit(1) and startx(1) for starting an Xorg server'
+pkgdesc='A fully statically linked dynamic X11 window manager written in Go, C and Lua'
 arch=('x86_64')
 license=('MIT')
 url='https://github.com/infraflakes/srwm'
