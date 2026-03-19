@@ -15,13 +15,13 @@ conflicts=("srwm-bin")
 source=("git+$url.git"
         "srwm.desktop")
 sha256sums=('SKIP'
-            'ddafeae9a00e051377e1ffaea36b7a1ca3ebce55b5a2c8506ac82589caadbffa')
+            'f3bf35d06e585093fd5413dc8e7e33754e301ee15ac4a31fc27c8af14d5c4e4a')
 pkgver() {
     cd "$pkgname"
     git describe --long 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
 }
 
-prepare(){
+_prepare(){
   sed 's|^Exec=.*|Exec=/usr/bin/srwm start|' srwm.desktop > srwm_nosx.desktop
 }
 
@@ -32,5 +32,5 @@ build() {
 
 package() {
    install -Dvm755 "${pkgname}/bin/srwm" "$pkgdir/usr/bin/srwm"
-   install -Dvm755 "srwm_nosx.desktop" "$pkgdir/usr/share/xsessions/srwm.desktop"
+   install -Dvm755 "srwm.desktop" "$pkgdir/usr/share/xsessions/srwm.desktop"
 }

@@ -1,30 +1,39 @@
+# Maintainer: zebra2711 <zebra2711t@gmail.com>
+
 pkgname=srwm-bin
-pkgver=0.1.10
+_pkgver=$(curl -s "https://api.github.com/repos/infraflakes/srwm/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='A fully statically linked dynamic X11 window manager written in Go, C and Lua'
 arch=('x86_64')
 license=('MIT')
 url='https://github.com/infraflakes/srwm'
-conflicts=("srwm" "sx")
-optdepends=('iw'
+conflicts=("srwm")
+options=('!strip')
+depends=()
+optdepends=('iw: to show wifi info'
             'xorg-xset'
             'bc')
-source=("https://github.com/infraflakes/srwm/releases/download/v${pkgver}/srwm-v${pkgver}-linux-amd64"
-        "https://github.com/infraflakes/srwm/releases/download/v${pkgver}/checksum.sha256"
-        "sx.sh"
-        "srwm.desktop")
+source=("$url/releases/download/v${_pkgver}/srwm-v${_pkgver}-linux-amd64"{,.sha256}
+        "srwm.desktop"
+        "https://raw.githubusercontent.com/infraflakes/srwm/refs/heads/main/LICENSE")
 sha256sums=('SKIP'
             'SKIP'
-            'bb3a3c3c3fa7cae1af132ab724dd796818f7782d866936ec1fdaa436684a170e'
-            'ddafeae9a00e051377e1ffaea36b7a1ca3ebce55b5a2c8506ac82589caadbffa')
+            'f3bf35d06e585093fd5413dc8e7e33754e301ee15ac4a31fc27c8af14d5c4e4a'
+            '8bbe268a549563fb2895eefd3c43869ca436eda0ba826474334270ad84a7c98d')
+
+pkgver() {
+   echo $_pkgver
+}
 
 prepare(){
-   sed 's|dist/||' checksum.sha256 | sha256sum -c - || exit 1
+   sha256sum -c "srwm-v${_pkgver}-linux-amd64.sha256" || exit 1
 }
+
 package() {
-   install -Dvm755 "sx.sh" "$pkgdir/usr/bin/sx"
-   install -Dvm755 "srwm-v${pkgver}-linux-amd64" "$pkgdir/usr/bin/srwm"
+   install -Dvm755 "srwm-v${_pkgver}-linux-amd64" "$pkgdir/usr/bin/srwm"
    install -Dvm755 "srwm.desktop" "$pkgdir/usr/share/xsessions/srwm.desktop"
+   install -Dvm644 LICENSE -t "$pkgdir/usr/share/licenses/${pkgname%-bin}/"
 }
 
 # vim:set ts=4 sts=4 sw=4 et:
