@@ -1,0 +1,79 @@
+diff --git a/src/helpers/Drm.cpp b/src/helpers/Drm.cpp
+new file mode 100644
+index 00000000000..207b5e3d4db
+--- /dev/null
++++ b/src/helpers/Drm.cpp
+@@ -0,0 +1,20 @@
++#include <xf86drm.h>
++#include "Drm.hpp"
++
++bool DRM::sameGpu(int fd1, int fd2) {
++    drmDevice* devA = nullptr;
++    drmDevice* devB = nullptr;
++
++    if (drmGetDevice2(fd1, 0, &devA) != 0)
++        return false;
++    if (drmGetDevice2(fd2, 0, &devB) != 0) {
++        drmFreeDevice(&devA);
++        return false;
++    }
++
++    bool same = drmDevicesEqual(devA, devB);
++
++    drmFreeDevice(&devA);
++    drmFreeDevice(&devB);
++    return same;
++}
+diff --git a/src/helpers/Drm.hpp b/src/helpers/Drm.hpp
+new file mode 100644
+index 00000000000..bc56b1eecc9
+--- /dev/null
++++ b/src/helpers/Drm.hpp
+@@ -0,0 +1,5 @@
++#pragma once
++
++namespace DRM {
++    bool sameGpu(int fd1, int fd2);
++}
+diff --git a/src/helpers/Monitor.cpp b/src/helpers/Monitor.cpp
+index bb7102693d1..eb8434a533e 100644
+--- a/src/helpers/Monitor.cpp
++++ b/src/helpers/Monitor.cpp
+@@ -32,6 +32,7 @@
+ #include "time/Time.hpp"
+ #include "../desktop/view/LayerSurface.hpp"
+ #include "../desktop/state/FocusState.hpp"
++#include "Drm.hpp"
+ #include <aquamarine/output/Output.hpp>
+ #include "debug/log/Logger.hpp"
+ #include "debug/HyprNotificationOverlay.hpp"
+@@ -1895,7 +1896,7 @@ bool CMonitor::attemptDirectScanout() {
+     m_output->state->addDamage(PSURFACE->m_current.accumulateBufferDamage());
+ 
+     // multigpu needs a fence to trigger fence syncing blits and also committing with the recreated dgpu fence
+-    if (m_output->getBackend()->preferredAllocator()->drmFD() != g_pCompositor->m_drm.fd && g_pHyprOpenGL->explicitSyncSupported()) {
++    if (!DRM::sameGpu(m_output->getBackend()->preferredAllocator()->drmFD(), g_pCompositor->m_drm.fd) && g_pHyprOpenGL->explicitSyncSupported()) {
+         auto sync = CEGLSync::create();
+ 
+         if (sync->fd().isValid()) {
+diff --git a/src/managers/PointerManager.cpp b/src/managers/PointerManager.cpp
+index 57e25791f51..2d752ea7e5f 100644
+--- a/src/managers/PointerManager.cpp
++++ b/src/managers/PointerManager.cpp
+@@ -17,6 +17,7 @@
+ #include "../desktop/state/FocusState.hpp"
+ #include "SeatManager.hpp"
+ #include "../helpers/time/Time.hpp"
++#include "../helpers/Drm.hpp"
+ #include <cstring>
+ #include <gbm.h>
+ #include <cairo/cairo.h>
+@@ -440,7 +441,7 @@ SP<Aquamarine::IBuffer> CPointerManager::renderHWCursorBuffer(SP<CPointerManager
+         options.length   = 2;
+         options.scanout  = true;
+         options.cursor   = true;
+-        options.multigpu = state->monitor->m_output->getBackend()->preferredAllocator()->drmFD() != g_pCompositor->m_drm.fd;
++        options.multigpu = !DRM::sameGpu(state->monitor->m_output->getBackend()->preferredAllocator()->drmFD(), g_pCompositor->m_drm.fd);
+         // We do not set the format (unless shm). If it's unset (DRM_FORMAT_INVALID) then the swapchain will pick for us,
+         // but if it's set, we don't wanna change it.
+         if (shouldUseCpuBuffer)

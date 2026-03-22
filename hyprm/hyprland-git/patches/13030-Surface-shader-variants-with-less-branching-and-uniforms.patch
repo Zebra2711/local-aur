@@ -1,0 +1,1015 @@
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index a88d5315171..6c75148ebc8 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -871,21 +871,42 @@ static void processShaderIncludes(std::string& source, const std::map<std::strin
+     }
+ }
+ 
+-static std::string processShader(const std::string& filename, const std::map<std::string, std::string>& includes) {
++static const uint8_t MAX_INCLUDE_DEPTH = 3;
++
++static std::string   processShader(const std::string& filename, const std::map<std::string, std::string>& includes, const uint8_t includeDepth = 1) {
+     auto source = loadShader(filename);
+-    processShaderIncludes(source, includes);
++    for (auto i = 0; i < includeDepth; i++) {
++        processShaderIncludes(source, includes);
++    }
+     return source;
+ }
+ 
+ bool CHyprOpenGLImpl::initShaders() {
+-    auto              shaders   = makeShared<SPreparedShaders>();
+-    const bool        isDynamic = m_shadersInitialized;
+-    static const auto PCM       = CConfigValue<Hyprlang::INT>("render:cm_enabled");
++    auto                               shaders = makeShared<SPreparedShaders>();
++    std::map<std::string, std::string> includes;
++    const bool                         isDynamic = m_shadersInitialized;
++    static const auto                  PCM       = CConfigValue<Hyprlang::INT>("render:cm_enabled");
+ 
+     try {
+-        std::map<std::string, std::string> includes;
++        loadShaderInclude("get_rgb_pixel.glsl", includes);
++        loadShaderInclude("get_rgba_pixel.glsl", includes);
++        loadShaderInclude("get_rgbx_pixel.glsl", includes);
++        loadShaderInclude("discard.glsl", includes);
++        loadShaderInclude("do_discard.glsl", includes);
++        loadShaderInclude("tint.glsl", includes);
++        loadShaderInclude("do_tint.glsl", includes);
+         loadShaderInclude("rounding.glsl", includes);
++        loadShaderInclude("do_rounding.glsl", includes);
++        loadShaderInclude("surface_CM.glsl", includes);
+         loadShaderInclude("CM.glsl", includes);
++        loadShaderInclude("do_CM.glsl", includes);
++        loadShaderInclude("tonemap.glsl", includes);
++        loadShaderInclude("do_tonemap.glsl", includes);
++        loadShaderInclude("sdr_mod.glsl", includes);
++        loadShaderInclude("do_sdr_mod.glsl", includes);
++        loadShaderInclude("primaries_xyz.glsl", includes);
++        loadShaderInclude("primaries_xyz_uniform.glsl", includes);
++        loadShaderInclude("primaries_xyz_const.glsl", includes);
+         loadShaderInclude("gain.glsl", includes);
+         loadShaderInclude("border.glsl", includes);
+ 
+@@ -896,17 +917,13 @@ bool CHyprOpenGLImpl::initShaders() {
+             m_cmSupported = false;
+         else {
+             std::vector<SFragShaderDesc> CM_SHADERS = {{
+-                {SH_FRAG_CM_RGBA, "CMrgba.frag"},
+-                {SH_FRAG_CM_RGBA_DISCARD, "CMrgbadiscard.frag"},
+-                {SH_FRAG_CM_RGBX, "CMrgbx.frag"},
+-                {SH_FRAG_CM_RGBX_DISCARD, "CMrgbadiscard.frag"},
+                 {SH_FRAG_CM_BLURPREPARE, "CMblurprepare.frag"},
+                 {SH_FRAG_CM_BORDER1, "CMborder.frag"},
+             }};
+ 
+             bool                         success = false;
+             for (const auto& desc : CM_SHADERS) {
+-                const auto fragSrc = processShader(desc.file, includes);
++                const auto fragSrc = processShader(desc.file, includes, MAX_INCLUDE_DEPTH);
+ 
+                 if (!(success = shaders->frag[desc.id]->createProgram(shaders->TEXVERTSRC, fragSrc, true, true)))
+                     break;
+@@ -926,11 +943,9 @@ bool CHyprOpenGLImpl::initShaders() {
+ 
+         std::vector<SFragShaderDesc> FRAG_SHADERS = {{
+             {SH_FRAG_QUAD, "quad.frag"},
+-            {SH_FRAG_RGBA, "rgba.frag"},
+             {SH_FRAG_PASSTHRURGBA, "passthru.frag"},
+             {SH_FRAG_MATTE, "rgbamatte.frag"},
+             {SH_FRAG_GLITCH, "glitch.frag"},
+-            {SH_FRAG_RGBX, "rgbx.frag"},
+             {SH_FRAG_EXT, "ext.frag"},
+             {SH_FRAG_BLUR1, "blur1.frag"},
+             {SH_FRAG_BLUR2, "blur2.frag"},
+@@ -941,7 +956,7 @@ bool CHyprOpenGLImpl::initShaders() {
+         }};
+ 
+         for (const auto& desc : FRAG_SHADERS) {
+-            const auto fragSrc = processShader(desc.file, includes);
++            const auto fragSrc = processShader(desc.file, includes, MAX_INCLUDE_DEPTH);
+ 
+             if (!shaders->frag[desc.id]->createProgram(shaders->TEXVERTSRC, fragSrc, isDynamic))
+                 return false;
+@@ -956,6 +971,7 @@ bool CHyprOpenGLImpl::initShaders() {
+     }
+ 
+     m_shaders            = shaders;
++    m_includes           = includes;
+     m_shadersInitialized = true;
+ 
+     Log::logger->log(Log::DEBUG, "Shaders initialized successfully.");
+@@ -1311,7 +1327,7 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
+ 
+     const bool  CRASHING = m_applyFinalShader && g_pHyprRenderer->m_crashingInProgress;
+ 
+-    auto        texType = tex->m_type;
++    uint8_t     shaderFeatures = 0;
+ 
+     if (CRASHING) {
+         shader           = m_shaders->frag[SH_FRAG_GLITCH];
+@@ -1325,8 +1341,8 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
+             usingFinalShader = true;
+         } else {
+             switch (tex->m_type) {
+-                case TEXTURE_RGBA: shader = m_shaders->frag[SH_FRAG_RGBA]; break;
+-                case TEXTURE_RGBX: shader = m_shaders->frag[SH_FRAG_RGBX]; break;
++                case TEXTURE_RGBA: shaderFeatures |= SH_FEAT_RGBA; break;
++                case TEXTURE_RGBX: shaderFeatures &= ~SH_FEAT_RGBA; break;
+ 
+                 case TEXTURE_EXTERNAL: shader = m_shaders->frag[SH_FRAG_EXT]; break; // might be unused
+                 default: RASSERT(false, "tex->m_iTarget unsupported!");
+@@ -1334,10 +1350,8 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
+         }
+     }
+ 
+-    if (m_renderData.currentWindow && m_renderData.currentWindow->m_ruleApplicator->RGBX().valueOrDefault()) {
+-        shader  = m_shaders->frag[SH_FRAG_RGBX];
+-        texType = TEXTURE_RGBX;
+-    }
++    if (m_renderData.currentWindow && m_renderData.currentWindow->m_ruleApplicator->RGBX().valueOrDefault())
++        shaderFeatures &= ~SH_FEAT_RGBA;
+ 
+     glActiveTexture(GL_TEXTURE0);
+     tex->bind();
+@@ -1367,29 +1381,52 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
+              (*PPASS == 1 && !isHDRSurface && m_renderData.pMonitor->m_cmType != NCMType::CM_HDR && m_renderData.pMonitor->m_cmType != NCMType::CM_HDR_EDID)) &&
+             m_renderData.pMonitor->inFullscreenMode()) /* Fullscreen window with pass cm enabled */;
+ 
+-    if (!skipCM && !usingFinalShader) {
+-        if (!data.discardActive) {
+-            if (texType == TEXTURE_RGBA)
+-                shader = m_shaders->frag[SH_FRAG_CM_RGBA];
+-            else if (texType == TEXTURE_RGBX)
+-                shader = m_shaders->frag[SH_FRAG_CM_RGBX];
+-        } else {
+-            if (texType == TEXTURE_RGBA)
+-                shader = m_shaders->frag[SH_FRAG_CM_RGBA_DISCARD];
+-            else if (texType == TEXTURE_RGBX)
+-                shader = m_shaders->frag[SH_FRAG_CM_RGBA_DISCARD];
++    if (data.discardActive)
++        shaderFeatures |= SH_FEAT_DISCARD;
++
++    if (!usingFinalShader) {
++        if (data.allowDim && m_renderData.currentWindow && (m_renderData.currentWindow->m_notRespondingTint->value() > 0 || m_renderData.currentWindow->m_dimPercent->value() > 0))
++            shaderFeatures |= SH_FEAT_TINT;
++
++        if (data.round > 0)
++            shaderFeatures |= SH_FEAT_ROUNDING;
++
++        if (!skipCM) {
++            shaderFeatures |= SH_FEAT_CM;
++
++            const bool  needsSDRmod  = isSDR2HDR(imageDescription->value(), m_renderData.pMonitor->m_imageDescription->value());
++            const bool  needsHDRmod  = !needsSDRmod && isHDR2SDR(imageDescription->value(), m_renderData.pMonitor->m_imageDescription->value());
++            const float maxLuminance = needsHDRmod ?
++                imageDescription->value().getTFMaxLuminance(-1) :
++                (imageDescription->value().luminances.max > 0 ? imageDescription->value().luminances.max : imageDescription->value().luminances.reference);
++            const auto  dstMaxLuminance =
++                m_renderData.pMonitor->m_imageDescription->value().luminances.max > 0 ? m_renderData.pMonitor->m_imageDescription->value().luminances.max : 10000;
++
++            if (maxLuminance >= dstMaxLuminance * 1.01)
++                shaderFeatures |= SH_FEAT_TONEMAP;
++
++            if (!data.cmBackToSRGB &&
++                (imageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_SRGB || imageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_GAMMA22) &&
++                m_renderData.pMonitor->m_imageDescription->value().transferFunction == CM_TRANSFER_FUNCTION_ST2084_PQ &&
++                ((m_renderData.pMonitor->m_sdrSaturation > 0 && m_renderData.pMonitor->m_sdrSaturation != 1.0f) ||
++                 (m_renderData.pMonitor->m_sdrBrightness > 0 && m_renderData.pMonitor->m_sdrBrightness != 1.0f)))
++                shaderFeatures |= SH_FEAT_SDR_MOD;
+         }
++    }
+ 
+-        shader = useShader(shader);
++    if (!shader)
++        shader = getSurfaceShader(shaderFeatures);
+ 
++    shader = useShader(shader);
++
++    if (!skipCM && !usingFinalShader) {
+         if (data.cmBackToSRGB) {
+             static auto PSDREOTF      = CConfigValue<Hyprlang::INT>("render:cm_sdr_eotf");
+             auto        chosenSdrEotf = *PSDREOTF != 3 ? NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22 : NColorManagement::CM_TRANSFER_FUNCTION_SRGB;
+             passCMUniforms(shader, imageDescription, CImageDescription::from(NColorManagement::SImageDescription{.transferFunction = chosenSdrEotf}), true, -1, -1);
+         } else
+             passCMUniforms(shader, imageDescription);
+-    } else
+-        shader = useShader(shader);
++    }
+ 
+     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
+     shader->setUniformInt(SHADER_TEX, 0);
+@@ -3030,6 +3067,55 @@ bool CHyprOpenGLImpl::explicitSyncSupported() {
+     return m_exts.EGL_ANDROID_native_fence_sync_ext;
+ }
+ 
++WP<CShader> CHyprOpenGLImpl::getSurfaceShader(uint8_t features) {
++    if (!m_shaders->fragVariants.contains(features)) {
++
++        auto shader                    = makeShared<CShader>();
++        auto includes                  = m_includes;
++        includes["get_rgb_pixel.glsl"] = includes[features & SH_FEAT_RGBA ? "get_rgba_pixel.glsl" : "get_rgbx_pixel.glsl"];
++        if (!(features & SH_FEAT_DISCARD)) {
++            includes["discard.glsl"]    = "";
++            includes["do_discard.glsl"] = "";
++        }
++        if (!(features & SH_FEAT_TINT)) {
++            includes["tint.glsl"]    = "";
++            includes["do_tint.glsl"] = "";
++        }
++        if (!(features & SH_FEAT_ROUNDING)) {
++            includes["rounding.glsl"]    = "";
++            includes["do_rounding.glsl"] = "";
++        }
++        if (!(features & SH_FEAT_CM)) {
++            includes["surface_CM.glsl"] = "";
++            includes["CM.glsl"]         = "";
++            includes["do_CM.glsl"]      = "";
++        }
++        if (!(features & SH_FEAT_TONEMAP)) {
++            includes["tonemap.glsl"]    = "";
++            includes["do_tonemap.glsl"] = "";
++        }
++        if (!(features & SH_FEAT_SDR_MOD)) {
++            includes["sdr_mod.glsl"]    = "";
++            includes["do_sdr_mod.glsl"] = "";
++        }
++        if (!(features & SH_FEAT_TONEMAP || features & SH_FEAT_SDR_MOD))
++            includes["primaries_xyz.glsl"] = includes["primaries_xyz_const.glsl"];
++
++        Log::logger->log(Log::INFO, "getSurfaceShader: compiling feature set {}", features);
++        const auto fragSrc = processShader("surface.frag", includes, MAX_INCLUDE_DEPTH);
++        if (shader->createProgram(m_shaders->TEXVERTSRC, fragSrc, true, true)) {
++            m_shaders->fragVariants[features] = shader;
++            return shader;
++        } else {
++            Log::logger->log(Log::ERR, "getSurfaceShader failed for {}. Falling back to old branching", features);
++            m_shaders->fragVariants[features] = nullptr;
++        }
++    }
++
++    ASSERT(m_shaders->fragVariants[features]);
++    return m_shaders->fragVariants[features];
++}
++
+ std::vector<SDRMFormat> CHyprOpenGLImpl::getDRMFormats() {
+     return m_drmFormats;
+ }
+diff --git a/src/render/OpenGL.hpp b/src/render/OpenGL.hpp
+index 4189e32bb9e..a538aa4b879 100644
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -89,10 +89,8 @@ enum eMonitorExtraRenderFBs : uint8_t {
+ 
+ enum ePreparedFragmentShader : uint8_t {
+     SH_FRAG_QUAD = 0,
+-    SH_FRAG_RGBA,
+     SH_FRAG_PASSTHRURGBA,
+     SH_FRAG_MATTE,
+-    SH_FRAG_RGBX,
+     SH_FRAG_EXT,
+     SH_FRAG_BLUR1,
+     SH_FRAG_BLUR2,
+@@ -103,14 +101,24 @@ enum ePreparedFragmentShader : uint8_t {
+     SH_FRAG_CM_BORDER1,
+     SH_FRAG_BORDER1,
+     SH_FRAG_GLITCH,
+-    SH_FRAG_CM_RGBA,
+-    SH_FRAG_CM_RGBA_DISCARD,
+-    SH_FRAG_CM_RGBX,
+-    SH_FRAG_CM_RGBX_DISCARD,
+ 
+     SH_FRAG_LAST,
+ };
+ 
++enum ePreparedFragmentShaderFeature : uint8_t {
++    SH_FEAT_UNKNOWN = 0, // all features just in case
++
++    SH_FEAT_RGBA     = (1 << 0), // RGBA/RGBX texture sampling
++    SH_FEAT_DISCARD  = (1 << 1), // RGBA/RGBX texture sampling
++    SH_FEAT_TINT     = (1 << 2), // uniforms: tint; condition: applyTint
++    SH_FEAT_ROUNDING = (1 << 3), // uniforms: radius, roundingPower, topLeft, fullSize; condition: radius > 0
++    SH_FEAT_CM       = (1 << 4), // uniforms: srcTFRange, dstTFRange, srcRefLuminance, convertMatrix; condition: !skipCM
++    SH_FEAT_TONEMAP  = (1 << 5), // uniforms: maxLuminance, dstMaxLuminance, dstRefLuminance; condition: maxLuminance < dstMaxLuminance * 1.01
++    SH_FEAT_SDR_MOD  = (1 << 6), // uniforms: sdrSaturation, sdrBrightnessMultiplier; condition: SDR <-> HDR && (sdrSaturation != 1 || sdrBrightnessMultiplier != 1)
++
++    // uniforms: targetPrimariesXYZ; condition: SH_FEAT_TONEMAP || SH_FEAT_SDR_MOD
++};
++
+ struct SFragShaderDesc {
+     ePreparedFragmentShader id;
+     const char*             file;
+@@ -126,6 +134,7 @@ struct SPreparedShaders {
+     std::string                           TEXVERTSRC;
+     std::string                           TEXVERTSRC320;
+     std::array<SP<CShader>, SH_FRAG_LAST> frag;
++    std::map<uint8_t, SP<CShader>>        fragVariants;
+ };
+ 
+ struct SMonitorRenderData {
+@@ -307,9 +316,11 @@ class CHyprOpenGLImpl {
+     void                                              ensureLockTexturesRendered(bool load);
+ 
+     bool                                              explicitSyncSupported();
++    WP<CShader>                                       getSurfaceShader(uint8_t features);
+ 
+     bool                                              m_shadersInitialized = false;
+     SP<SPreparedShaders>                              m_shaders;
++    std::map<std::string, std::string>                m_includes;
+ 
+     SCurrentRenderData                                m_renderData;
+ 
+diff --git a/src/render/shaders/glsl/CM.glsl b/src/render/shaders/glsl/CM.glsl
+index 8b02c5ee246..36c95a9021b 100644
+--- a/src/render/shaders/glsl/CM.glsl
++++ b/src/render/shaders/glsl/CM.glsl
+@@ -1,14 +1,11 @@
+ uniform vec2 srcTFRange;
+ uniform vec2 dstTFRange;
+ 
+-uniform float maxLuminance;
+ uniform float srcRefLuminance;
+-uniform float dstMaxLuminance;
+-uniform float dstRefLuminance;
+-uniform float sdrSaturation;
+-uniform float sdrBrightnessMultiplier;
+ uniform mat3 convertMatrix;
+ 
++#include "sdr_mod.glsl"
++
+ //enum eTransferFunction
+ #define CM_TRANSFER_FUNCTION_BT1886     1
+ #define CM_TRANSFER_FUNCTION_GAMMA22    2
+@@ -68,21 +65,6 @@ uniform mat3 convertMatrix;
+ 
+ #define M_E 2.718281828459045
+ 
+-vec3 xy2xyz(vec2 xy) {
+-    if (xy.y == 0.0)
+-        return vec3(0.0, 0.0, 0.0);
+-
+-    return vec3(xy.x / xy.y, 1.0, (1.0 - xy.x - xy.y) / xy.y);
+-}
+-
+-vec4 saturate(vec4 color, mat3 primaries, float saturation) {
+-    if (saturation == 1.0)
+-        return color;
+-    vec3 brightness = vec3(primaries[1][0], primaries[1][1], primaries[1][2]);
+-    float Y = dot(color.rgb, brightness);
+-    return vec4(mix(vec3(Y), color.rgb, saturation), color[3]);
+-}
+-
+ // The primary source for these transfer functions is https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.1361-0-199802-W!!PDF-E.pdf
+ vec3 tfInvPQ(vec3 color) {
+     vec3 E = pow(clamp(color.rgb, vec3(0.0), vec3(1.0)), vec3(PQ_INV_M2));
+@@ -280,126 +262,7 @@ vec4 fromLinearNit(vec4 color, int tf, vec2 range) {
+     return color;
+ }
+ 
+-mat3 primaries2xyz(mat4x2 primaries) {
+-    vec3 r = xy2xyz(primaries[0]);
+-    vec3 g = xy2xyz(primaries[1]);
+-    vec3 b = xy2xyz(primaries[2]);
+-    vec3 w = xy2xyz(primaries[3]);
+-
+-    mat3 invMat = inverse(
+-       mat3(
+-            r.x, r.y, r.z,
+-            g.x, g.y, g.z,
+-            b.x, b.y, b.z
+-        )
+-    );
+-
+-    vec3 s = invMat * w;
+-
+-    return mat3(
+-        s.r * r.x, s.r * r.y, s.r * r.z,
+-        s.g * g.x, s.g * g.y, s.g * g.z,
+-        s.b * b.x, s.b * b.y, s.b * b.z
+-    );
+-}
+-
+-
+-mat3 adaptWhite(vec2 src, vec2 dst) {
+-    if (src == dst)
+-        return mat3(
+-            1.0, 0.0, 0.0,
+-            0.0, 1.0, 0.0,
+-            0.0, 0.0, 1.0
+-        );
+-
+-    // const vec2 D65 = vec2(0.3127, 0.3290);
+-    const mat3 Bradford = mat3(
+-        0.8951, 0.2664, -0.1614,
+-        -0.7502, 1.7135, 0.0367,
+-        0.0389, -0.0685, 1.0296
+-    );
+-    mat3 BradfordInv = inverse(Bradford);
+-    vec3 srcXYZ = xy2xyz(src);
+-    vec3 dstXYZ = xy2xyz(dst);
+-    vec3 factors = (Bradford * dstXYZ) / (Bradford * srcXYZ);
+-
+-    return BradfordInv * mat3(
+-        factors.x, 0.0, 0.0,
+-        0.0, factors.y, 0.0,
+-        0.0, 0.0, factors.z
+-    ) * Bradford;
+-}
+-
+-vec4 convertPrimaries(vec4 color, mat3 src, vec2 srcWhite, mat3 dst, vec2 dstWhite) {
+-    mat3 convMat = inverse(dst) * adaptWhite(srcWhite, dstWhite) * src;
+-    return vec4(convMat * color.rgb, color[3]);
+-}
+-
+-const mat3 BT2020toLMS = mat3(
+-    0.3592, 0.6976, -0.0358,
+-    -0.1922, 1.1004, 0.0755,
+-    0.0070, 0.0749, 0.8434
+-);
+-//const mat3 LMStoBT2020 = inverse(BT2020toLMS);
+-const mat3 LMStoBT2020 = mat3(
+-    2.0701800566956135096, -1.3264568761030210255, 0.20661600684785517081,
+-    0.36498825003265747974, 0.68046736285223514102, -0.045421753075853231409,
+-    -0.049595542238932107896, -0.049421161186757487412, 1.1879959417328034394
+-);
+-
+-// const mat3 ICtCpPQ = transpose(mat3(
+-//     2048.0, 2048.0, 0.0,
+-//     6610.0, -13613.0, 7003.0,
+-//     17933.0, -17390.0, -543.0
+-// ) / 4096.0);
+-const mat3 ICtCpPQ = mat3(
+-    0.5,  1.61376953125,   4.378173828125,
+-    0.5, -3.323486328125, -4.24560546875,
+-    0.0,  1.709716796875, -0.132568359375
+-);
+-//const mat3 ICtCpPQInv = inverse(ICtCpPQ);
+-const mat3 ICtCpPQInv = mat3(
+-    1.0,                     1.0,                     1.0,
+-    0.0086090370379327566,  -0.0086090370379327566,   0.560031335710679118,
+-    0.11102962500302595656, -0.11102962500302595656, -0.32062717498731885185
+-);
+-
+-// unused for now
+-// const mat3 ICtCpHLG = transpose(mat3(
+-//     2048.0, 2048.0, 0.0,
+-//     3625.0, -7465.0, 3840.0,
+-//     9500.0, -9212.0, -288.0
+-// ) / 4096.0);
+-// const mat3 ICtCpHLGInv = inverse(ICtCpHLG);
+-
+-vec4 tonemap(vec4 color, mat3 dstXYZ) {
+-    if (maxLuminance < dstMaxLuminance * 1.01)
+-        return vec4(clamp(color.rgb, vec3(0.0), vec3(dstMaxLuminance)), color[3]);
+-
+-    mat3 toLMS = BT2020toLMS * dstXYZ;
+-    mat3 fromLMS = inverse(dstXYZ) * LMStoBT2020;
+-
+-    vec3 lms = fromLinear(vec4((toLMS * color.rgb) / HDR_MAX_LUMINANCE, 1.0), CM_TRANSFER_FUNCTION_ST2084_PQ).rgb;
+-    vec3 ICtCp = ICtCpPQ * lms;
+-
+-    float E = pow(clamp(ICtCp[0], 0.0, 1.0), PQ_INV_M2);
+-    float luminance = pow(
+-        (max(E - PQ_C1, 0.0)) / (PQ_C2 - PQ_C3 * E),
+-        PQ_INV_M1
+-    ) * HDR_MAX_LUMINANCE;
+-
+-    float linearPart = min(luminance, dstRefLuminance);
+-    float luminanceAboveRef = max(luminance - dstRefLuminance, 0.0);
+-    float maxExcessLuminance = max(maxLuminance - dstRefLuminance, 1.0);
+-    float shoulder = log((luminanceAboveRef / maxExcessLuminance + 1.0) * (M_E - 1.0));
+-    float mappedHigh = shoulder * (dstMaxLuminance - dstRefLuminance);
+-    float newLum = clamp(linearPart + mappedHigh, 0.0, dstMaxLuminance);
+-
+-    // scale src to dst reference
+-    float refScale = dstRefLuminance / srcRefLuminance;
+-
+-    return vec4(fromLMS * toLinear(vec4(ICtCpPQInv * ICtCp, 1.0), CM_TRANSFER_FUNCTION_ST2084_PQ).rgb * HDR_MAX_LUMINANCE * refScale, color[3]); 
+-}
++#include "tonemap.glsl"
+ 
+ vec4 doColorManagement(vec4 pixColor, int srcTF, int dstTF, mat3 dstxyz) {
+     pixColor.rgb /= max(pixColor.a, 0.001);
+@@ -407,11 +270,9 @@ vec4 doColorManagement(vec4 pixColor, int srcTF, int dstTF, mat3 dstxyz) {
+     pixColor.rgb = convertMatrix * pixColor.rgb;
+     pixColor = toNit(pixColor, srcTFRange);
+     pixColor.rgb *= pixColor.a;
+-    pixColor = tonemap(pixColor, dstxyz);
++    #include "do_tonemap.glsl"
+     pixColor = fromLinearNit(pixColor, dstTF, dstTFRange);
+-    if ((srcTF == CM_TRANSFER_FUNCTION_SRGB || srcTF == CM_TRANSFER_FUNCTION_GAMMA22) && dstTF == CM_TRANSFER_FUNCTION_ST2084_PQ) {
+-        pixColor = saturate(pixColor, dstxyz, sdrSaturation);
+-        pixColor.rgb *= sdrBrightnessMultiplier;
+-    }
++    #include "do_sdr_mod.glsl"
++
+     return pixColor;
+ }
+diff --git a/src/render/shaders/glsl/CMrgba.frag b/src/render/shaders/glsl/CMrgba.frag
+deleted file mode 100644
+index b66966496d6..00000000000
+--- a/src/render/shaders/glsl/CMrgba.frag
++++ /dev/null
+@@ -1,33 +0,0 @@
+-#version 300 es
+-#extension GL_ARB_shading_language_include : enable
+-
+-precision highp float;
+-in vec2 v_texcoord;
+-uniform sampler2D tex;
+-
+-uniform int sourceTF; // eTransferFunction
+-uniform int targetTF; // eTransferFunction
+-uniform mat3 targetPrimariesXYZ;
+-
+-uniform float alpha;
+-uniform bool applyTint;
+-uniform vec3 tint;
+-
+-#include "rounding.glsl"
+-#include "CM.glsl"
+-
+-layout(location = 0) out vec4 fragColor;
+-void main() {
+-    vec4 pixColor = texture(tex, v_texcoord);
+-
+-    // this shader shouldn't be used when skipCM == 1
+-    pixColor = doColorManagement(pixColor, sourceTF, targetTF, targetPrimariesXYZ);
+-
+-    if (applyTint)
+-        pixColor.rgb *= tint;
+-
+-    if (radius > 0.0)
+-        pixColor = rounding(pixColor);
+-
+-    fragColor = pixColor * alpha;
+-}
+diff --git a/src/render/shaders/glsl/CMrgbadiscard.frag b/src/render/shaders/glsl/CMrgbadiscard.frag
+deleted file mode 100644
+index 9be2ed9750f..00000000000
+--- a/src/render/shaders/glsl/CMrgbadiscard.frag
++++ /dev/null
+@@ -1,44 +0,0 @@
+-#version 300 es
+-#extension GL_ARB_shading_language_include : enable
+-
+-precision highp float;
+-in vec2 v_texcoord;
+-uniform sampler2D tex;
+-
+-uniform int sourceTF; // eTransferFunction
+-uniform int targetTF; // eTransferFunction
+-uniform mat3 targetPrimariesXYZ;
+-
+-uniform float alpha;
+-
+-uniform bool discardOpaque;
+-uniform bool discardAlpha;
+-uniform float discardAlphaValue;
+-
+-uniform bool applyTint;
+-uniform vec3 tint;
+-
+-#include "rounding.glsl"
+-#include "CM.glsl"
+-
+-layout(location = 0) out vec4 fragColor;
+-void main() {
+-    vec4 pixColor = texture(tex, v_texcoord);
+-
+-    if (discardOpaque && pixColor.a * alpha == 1.0)
+-        discard;
+-
+-    if (discardAlpha && pixColor.a <= discardAlphaValue)
+-        discard;
+-
+-    // this shader shouldn't be used when skipCM == 1
+-    pixColor = doColorManagement(pixColor, sourceTF, targetTF, targetPrimariesXYZ);
+-
+-    if (applyTint)
+-        pixColor.rgb *= tint;
+-
+-    if (radius > 0.0)
+-        pixColor = rounding(pixColor);
+-
+-    fragColor = pixColor * alpha;
+-}
+diff --git a/src/render/shaders/glsl/CMrgbx.frag b/src/render/shaders/glsl/CMrgbx.frag
+deleted file mode 100644
+index d37328de861..00000000000
+--- a/src/render/shaders/glsl/CMrgbx.frag
++++ /dev/null
+@@ -1,33 +0,0 @@
+-#version 300 es
+-#extension GL_ARB_shading_language_include : enable
+-
+-precision highp float;
+-in vec2 v_texcoord;
+-uniform sampler2D tex;
+-
+-uniform int sourceTF; // eTransferFunction
+-uniform int targetTF; // eTransferFunction
+-uniform mat3 targetPrimariesXYZ;
+-
+-uniform float alpha;
+-uniform bool applyTint;
+-uniform vec3 tint;
+-
+-#include "rounding.glsl"
+-#include "CM.glsl"
+-
+-layout(location = 0) out vec4 fragColor;
+-void main() {
+-    vec4 pixColor = vec4(texture(tex, v_texcoord).rgb, 1.0);
+-
+-    // this shader shouldn't be used when skipCM == 1
+-    pixColor = doColorManagement(pixColor, sourceTF, targetTF, targetPrimariesXYZ);
+-
+-    if (applyTint)
+-        pixColor.rgb *= tint;
+-
+-    if (radius > 0.0)
+-        pixColor = rounding(pixColor);
+-
+-    fragColor = pixColor * alpha;
+-}
+diff --git a/src/render/shaders/glsl/CMrgbxdiscard.frag b/src/render/shaders/glsl/CMrgbxdiscard.frag
+deleted file mode 100644
+index a4c05d00340..00000000000
+--- a/src/render/shaders/glsl/CMrgbxdiscard.frag
++++ /dev/null
+@@ -1,44 +0,0 @@
+-#version 300 es
+-#extension GL_ARB_shading_language_include : enable
+-
+-precision highp float;
+-in vec2 v_texcoord;
+-uniform sampler2D tex;
+-
+-uniform int sourceTF; // eTransferFunction
+-uniform int targetTF; // eTransferFunction
+-uniform mat3 targetPrimariesXYZ;
+-
+-uniform float alpha;
+-
+-uniform bool discardOpaque;
+-uniform bool discardAlpha;
+-uniform float discardAlphaValue;
+-
+-uniform bool applyTint;
+-uniform vec3 tint;
+-
+-#include "rounding.glsl"
+-#include "CM.glsl"
+-
+-layout(location = 0) out vec4 fragColor;
+-void main() {
+-    vec4 pixColor = vec4(texture(tex, v_texcoord).rgb, 1.0);
+-
+-    if (discardOpaque && pixColor.a * alpha == 1.0)
+-        discard;
+-
+-    if (discardAlpha && pixColor.a <= discardAlphaValue)
+-        discard;
+-
+-    // this shader shouldn't be used when skipCM == 1
+-    pixColor = doColorManagement(pixColor, sourceTF, targetTF, targetPrimariesXYZ);
+-
+-    if (applyTint)
+-        pixColor.rgb *= tint;
+-
+-    if (radius > 0.0)
+-        pixColor = rounding(pixColor);
+-
+-    fragColor = pixColor * alpha;
+-}
+diff --git a/src/render/shaders/glsl/discard.glsl b/src/render/shaders/glsl/discard.glsl
+new file mode 100644
+index 00000000000..311776de9ae
+--- /dev/null
++++ b/src/render/shaders/glsl/discard.glsl
+@@ -0,0 +1,3 @@
++uniform bool discardOpaque;
++uniform bool discardAlpha;
++uniform float discardAlphaValue;
+diff --git a/src/render/shaders/glsl/do_CM.glsl b/src/render/shaders/glsl/do_CM.glsl
+new file mode 100644
+index 00000000000..b63d03e59d9
+--- /dev/null
++++ b/src/render/shaders/glsl/do_CM.glsl
+@@ -0,0 +1 @@
++pixColor = doColorManagement(pixColor, sourceTF, targetTF, targetPrimariesXYZ);
+\ No newline at end of file
+diff --git a/src/render/shaders/glsl/do_discard.glsl b/src/render/shaders/glsl/do_discard.glsl
+new file mode 100644
+index 00000000000..df6e57e3c86
+--- /dev/null
++++ b/src/render/shaders/glsl/do_discard.glsl
+@@ -0,0 +1,5 @@
++if (discardOpaque && pixColor.a * alpha == 1.0)
++    discard;
++
++if (discardAlpha && pixColor.a <= discardAlphaValue)
++    discard;
+\ No newline at end of file
+diff --git a/src/render/shaders/glsl/do_rounding.glsl b/src/render/shaders/glsl/do_rounding.glsl
+new file mode 100644
+index 00000000000..60368fb1769
+--- /dev/null
++++ b/src/render/shaders/glsl/do_rounding.glsl
+@@ -0,0 +1 @@
++pixColor = rounding(pixColor);
+\ No newline at end of file
+diff --git a/src/render/shaders/glsl/do_sdr_mod.glsl b/src/render/shaders/glsl/do_sdr_mod.glsl
+new file mode 100644
+index 00000000000..05dbe180a2e
+--- /dev/null
++++ b/src/render/shaders/glsl/do_sdr_mod.glsl
+@@ -0,0 +1,2 @@
++pixColor = saturate(pixColor, dstxyz, sdrSaturation);
++pixColor.rgb *= sdrBrightnessMultiplier;
+diff --git a/src/render/shaders/glsl/do_tint.glsl b/src/render/shaders/glsl/do_tint.glsl
+new file mode 100644
+index 00000000000..b761b704190
+--- /dev/null
++++ b/src/render/shaders/glsl/do_tint.glsl
+@@ -0,0 +1 @@
++pixColor.rgb = pixColor.rgb * tint;
+diff --git a/src/render/shaders/glsl/do_tonemap.glsl b/src/render/shaders/glsl/do_tonemap.glsl
+new file mode 100644
+index 00000000000..db23b0f8ca2
+--- /dev/null
++++ b/src/render/shaders/glsl/do_tonemap.glsl
+@@ -0,0 +1 @@
++pixColor = tonemap(pixColor, dstxyz);
+\ No newline at end of file
+diff --git a/src/render/shaders/glsl/get_rgb_pixel.glsl b/src/render/shaders/glsl/get_rgb_pixel.glsl
+new file mode 100644
+index 00000000000..31097c582fe
+--- /dev/null
++++ b/src/render/shaders/glsl/get_rgb_pixel.glsl
+@@ -0,0 +1 @@
++#include "get_rgbx_pixel.glsl"
+\ No newline at end of file
+diff --git a/src/render/shaders/glsl/get_rgba_pixel.glsl b/src/render/shaders/glsl/get_rgba_pixel.glsl
+new file mode 100644
+index 00000000000..23ad0cf2f71
+--- /dev/null
++++ b/src/render/shaders/glsl/get_rgba_pixel.glsl
+@@ -0,0 +1 @@
++vec4 pixColor = texture(tex, v_texcoord);
+diff --git a/src/render/shaders/glsl/get_rgbx_pixel.glsl b/src/render/shaders/glsl/get_rgbx_pixel.glsl
+new file mode 100644
+index 00000000000..fa4eb74bc72
+--- /dev/null
++++ b/src/render/shaders/glsl/get_rgbx_pixel.glsl
+@@ -0,0 +1 @@
++vec4 pixColor = vec4(texture(tex, v_texcoord).rgb, 1.0);
+diff --git a/src/render/shaders/glsl/primaries_xyz.glsl b/src/render/shaders/glsl/primaries_xyz.glsl
+new file mode 100644
+index 00000000000..ddcb5c70200
+--- /dev/null
++++ b/src/render/shaders/glsl/primaries_xyz.glsl
+@@ -0,0 +1 @@
++#include "primaries_xyz_uniform.glsl"
+\ No newline at end of file
+diff --git a/src/render/shaders/glsl/primaries_xyz_const.glsl b/src/render/shaders/glsl/primaries_xyz_const.glsl
+new file mode 100644
+index 00000000000..5499d1cd329
+--- /dev/null
++++ b/src/render/shaders/glsl/primaries_xyz_const.glsl
+@@ -0,0 +1 @@
++const mat3 targetPrimariesXYZ = mat3(0.0);
+diff --git a/src/render/shaders/glsl/primaries_xyz_uniform.glsl b/src/render/shaders/glsl/primaries_xyz_uniform.glsl
+new file mode 100644
+index 00000000000..6c0558f0fd8
+--- /dev/null
++++ b/src/render/shaders/glsl/primaries_xyz_uniform.glsl
+@@ -0,0 +1 @@
++uniform mat3 targetPrimariesXYZ;
+\ No newline at end of file
+diff --git a/src/render/shaders/glsl/rgba.frag b/src/render/shaders/glsl/rgba.frag
+deleted file mode 100644
+index e4e04500467..00000000000
+--- a/src/render/shaders/glsl/rgba.frag
++++ /dev/null
+@@ -1,39 +0,0 @@
+-#version 300 es
+-
+-#extension GL_ARB_shading_language_include : enable
+-precision highp float;
+-in vec2 v_texcoord; // is in 0-1
+-uniform sampler2D tex;
+-uniform float alpha;
+-
+-#include "rounding.glsl"
+-
+-uniform int discardOpaque;
+-uniform int discardAlpha;
+-uniform float discardAlphaValue;
+-
+-uniform int applyTint;
+-uniform vec3 tint;
+-
+-layout(location = 0) out vec4 fragColor;
+-void main() {
+-
+-    vec4 pixColor = texture(tex, v_texcoord);
+-
+-    if (discardOpaque == 1 && pixColor[3] * alpha == 1.0)
+-	    discard;
+-
+-    if (discardAlpha == 1 && pixColor[3] <= discardAlphaValue)
+-        discard;
+-
+-    if (applyTint == 1) {
+-	    pixColor[0] = pixColor[0] * tint[0];
+-	    pixColor[1] = pixColor[1] * tint[1];
+-	    pixColor[2] = pixColor[2] * tint[2];
+-    }
+-
+-    if (radius > 0.0)
+-    	pixColor = rounding(pixColor);
+-
+-    fragColor = pixColor * alpha;
+-}
+diff --git a/src/render/shaders/glsl/rgbx.frag b/src/render/shaders/glsl/rgbx.frag
+deleted file mode 100644
+index 84672d7679f..00000000000
+--- a/src/render/shaders/glsl/rgbx.frag
++++ /dev/null
+@@ -1,35 +0,0 @@
+-#version 300 es
+-#extension GL_ARB_shading_language_include : enable
+-precision highp float;
+-in vec2 v_texcoord;
+-uniform sampler2D tex;
+-uniform float alpha;
+-
+-#include "rounding.glsl"
+-
+-uniform int discardOpaque;
+-uniform int discardAlpha;
+-uniform int discardAlphaValue;
+-
+-uniform int applyTint;
+-uniform vec3 tint;
+-
+-layout(location = 0) out vec4 fragColor;
+-void main() {
+-
+-    if (discardOpaque == 1 && alpha == 1.0)
+-	discard;
+-
+-    vec4 pixColor = vec4(texture(tex, v_texcoord).rgb, 1.0);
+-
+-    if (applyTint == 1) {
+-	    pixColor[0] = pixColor[0] * tint[0];
+-	    pixColor[1] = pixColor[1] * tint[1];
+-	    pixColor[2] = pixColor[2] * tint[2];
+-    }
+-
+-    if (radius > 0.0)
+-		pixColor = rounding(pixColor);
+-
+-    fragColor = pixColor * alpha;
+-}
+diff --git a/src/render/shaders/glsl/sdr_mod.glsl b/src/render/shaders/glsl/sdr_mod.glsl
+new file mode 100644
+index 00000000000..7803d804a67
+--- /dev/null
++++ b/src/render/shaders/glsl/sdr_mod.glsl
+@@ -0,0 +1,10 @@
++uniform float sdrSaturation;
++uniform float sdrBrightnessMultiplier;
++
++vec4 saturate(vec4 color, mat3 primaries, float saturation) {
++    if (saturation == 1.0)
++        return color;
++    vec3 brightness = vec3(primaries[1][0], primaries[1][1], primaries[1][2]);
++    float Y = dot(color.rgb, brightness);
++    return vec4(mix(vec3(Y), color.rgb, saturation), color[3]);
++}
+diff --git a/src/render/shaders/glsl/surface.frag b/src/render/shaders/glsl/surface.frag
+new file mode 100644
+index 00000000000..1d3e80b8840
+--- /dev/null
++++ b/src/render/shaders/glsl/surface.frag
+@@ -0,0 +1,25 @@
++#version 300 es
++#extension GL_ARB_shading_language_include : enable
++
++precision highp float;
++in vec2 v_texcoord;
++uniform sampler2D tex;
++
++uniform float alpha;
++
++#include "discard.glsl"
++#include "tint.glsl"
++#include "rounding.glsl"
++#include "surface_CM.glsl"
++
++layout(location = 0) out vec4 fragColor;
++void main() {
++    #include "get_rgb_pixel.glsl"
++
++    #include "do_discard.glsl"
++    #include "do_CM.glsl"
++    #include "do_tint.glsl"
++    #include "do_rounding.glsl"
++
++    fragColor = pixColor * alpha;
++}
+diff --git a/src/render/shaders/glsl/surface_CM.glsl b/src/render/shaders/glsl/surface_CM.glsl
+new file mode 100644
+index 00000000000..f90b23c2c2a
+--- /dev/null
++++ b/src/render/shaders/glsl/surface_CM.glsl
+@@ -0,0 +1,4 @@
++uniform int sourceTF; // eTransferFunction
++uniform int targetTF; // eTransferFunction
++#include "primaries_xyz.glsl"
++#include "CM.glsl"
+diff --git a/src/render/shaders/glsl/tint.glsl b/src/render/shaders/glsl/tint.glsl
+new file mode 100644
+index 00000000000..1523100ee0b
+--- /dev/null
++++ b/src/render/shaders/glsl/tint.glsl
+@@ -0,0 +1 @@
++uniform vec3 tint;
+diff --git a/src/render/shaders/glsl/tonemap.glsl b/src/render/shaders/glsl/tonemap.glsl
+new file mode 100644
+index 00000000000..f6ac01f0d44
+--- /dev/null
++++ b/src/render/shaders/glsl/tonemap.glsl
+@@ -0,0 +1,69 @@
++uniform float maxLuminance;
++uniform float dstMaxLuminance;
++uniform float dstRefLuminance;
++
++const mat3 BT2020toLMS = mat3(
++    0.3592, 0.6976, -0.0358,
++    -0.1922, 1.1004, 0.0755,
++    0.0070, 0.0749, 0.8434
++);
++//const mat3 LMStoBT2020 = inverse(BT2020toLMS);
++const mat3 LMStoBT2020 = mat3(
++    2.0701800566956135096, -1.3264568761030210255, 0.20661600684785517081,
++    0.36498825003265747974, 0.68046736285223514102, -0.045421753075853231409,
++    -0.049595542238932107896, -0.049421161186757487412, 1.1879959417328034394
++);
++
++// const mat3 ICtCpPQ = transpose(mat3(
++//     2048.0, 2048.0, 0.0,
++//     6610.0, -13613.0, 7003.0,
++//     17933.0, -17390.0, -543.0
++// ) / 4096.0);
++const mat3 ICtCpPQ = mat3(
++    0.5,  1.61376953125,   4.378173828125,
++    0.5, -3.323486328125, -4.24560546875,
++    0.0,  1.709716796875, -0.132568359375
++);
++//const mat3 ICtCpPQInv = inverse(ICtCpPQ);
++const mat3 ICtCpPQInv = mat3(
++    1.0,                     1.0,                     1.0,
++    0.0086090370379327566,  -0.0086090370379327566,   0.560031335710679118,
++    0.11102962500302595656, -0.11102962500302595656, -0.32062717498731885185
++);
++
++// unused for now
++// const mat3 ICtCpHLG = transpose(mat3(
++//     2048.0, 2048.0, 0.0,
++//     3625.0, -7465.0, 3840.0,
++//     9500.0, -9212.0, -288.0
++// ) / 4096.0);
++// const mat3 ICtCpHLGInv = inverse(ICtCpHLG);
++
++vec4 tonemap(vec4 color, mat3 dstXYZ) {
++    if (maxLuminance < dstMaxLuminance * 1.01)
++        return vec4(clamp(color.rgb, vec3(0.0), vec3(dstMaxLuminance)), color[3]);
++
++    mat3 toLMS = BT2020toLMS * dstXYZ;
++    mat3 fromLMS = inverse(dstXYZ) * LMStoBT2020;
++
++    vec3 lms = fromLinear(vec4((toLMS * color.rgb) / HDR_MAX_LUMINANCE, 1.0), CM_TRANSFER_FUNCTION_ST2084_PQ).rgb;
++    vec3 ICtCp = ICtCpPQ * lms;
++
++    float E = pow(clamp(ICtCp[0], 0.0, 1.0), PQ_INV_M2);
++    float luminance = pow(
++        (max(E - PQ_C1, 0.0)) / (PQ_C2 - PQ_C3 * E),
++        PQ_INV_M1
++    ) * HDR_MAX_LUMINANCE;
++
++    float linearPart = min(luminance, dstRefLuminance);
++    float luminanceAboveRef = max(luminance - dstRefLuminance, 0.0);
++    float maxExcessLuminance = max(maxLuminance - dstRefLuminance, 1.0);
++    float shoulder = log((luminanceAboveRef / maxExcessLuminance + 1.0) * (M_E - 1.0));
++    float mappedHigh = shoulder * (dstMaxLuminance - dstRefLuminance);
++    float newLum = clamp(linearPart + mappedHigh, 0.0, dstMaxLuminance);
++
++    // scale src to dst reference
++    float refScale = dstRefLuminance / srcRefLuminance;
++
++    return vec4(fromLMS * toLinear(vec4(ICtCpPQInv * ICtCp, 1.0), CM_TRANSFER_FUNCTION_ST2084_PQ).rgb * HDR_MAX_LUMINANCE * refScale, color[3]); 
++}

@@ -1,0 +1,277 @@
+diff --git a/src/helpers/MonitorFrameScheduler.cpp b/src/helpers/MonitorFrameScheduler.cpp
+index 1e8a81e5..e472ec73 100644
+--- a/src/helpers/MonitorFrameScheduler.cpp
++++ b/src/helpers/MonitorFrameScheduler.cpp
+@@ -60,20 +60,13 @@ void CMonitorFrameScheduler::onPresented() {
+ 
+     m_pendingThird = false;
+ 
+-    Debug::log(TRACE, "CMonitorFrameScheduler: {} -> onPresented, missed, committing pending at the earliest convenience.", m_monitor->m_name);
++    auto mon = m_monitor.lock();
++    g_pHyprRenderer->commitPendingAndDoExplicitSync(mon); // commit the pending frame. If it didn't fire yet (is not rendered) it doesn't matter. Syncs will wait.
+ 
+-    m_pendingThird = false;
+-
+-    g_pEventLoopManager->doLater([m = m_monitor.lock()] {
+-        if (!m)
+-            return;
+-        g_pHyprRenderer->commitPendingAndDoExplicitSync(m); // commit the pending frame. If it didn't fire yet (is not rendered) it doesn't matter. Syncs will wait.
+-
+-        // schedule a frame: we might have some missed damage, which got cleared due to the above commit.
+-        // TODO: this is not always necessary, but doesn't hurt in general. We likely won't hit this if nothing's happening anyways.
+-        if (m->m_damage.hasChanged())
+-            g_pCompositor->scheduleFrameForMonitor(m);
+-    });
++    // schedule a frame: we might have some missed damage, which got cleared due to the above commit.
++    // TODO: this is not always necessary, but doesn't hurt in general. We likely won't hit this if nothing's happening anyways.
++    if (mon->m_damage.hasChanged())
++        g_pCompositor->scheduleFrameForMonitor(mon);
+ }
+ 
+ void CMonitorFrameScheduler::onFrame() {
+@@ -122,10 +115,11 @@ void CMonitorFrameScheduler::onFrame() {
+ }
+ 
+ void CMonitorFrameScheduler::onFinishRender() {
+-    m_sync = CEGLSync::create(); // this destroys the old sync
+-    g_pEventLoopManager->doOnReadable(m_sync->fd().duplicate(), [this, self = m_self] {
++    m_pendingSync = true;
++    g_pEventLoopManager->doOnReadable(m_monitor->m_inFence.duplicate(), [this, self = m_self] {
+         if (!self) // might've gotten destroyed
+             return;
++				 m_pendingSync = false;
+         onSyncFired();
+     });
+ }
+diff --git a/src/helpers/MonitorFrameScheduler.hpp b/src/helpers/MonitorFrameScheduler.hpp
+index c9b45a64..1241454f 100644
+--- a/src/helpers/MonitorFrameScheduler.hpp
++++ b/src/helpers/MonitorFrameScheduler.hpp
+@@ -33,6 +33,7 @@ class CMonitorFrameScheduler {
+     PHLMONITORREF              m_monitor;
+ 
+     UP<CEGLSync>               m_sync;
++		 bool											  m_pendingSync = false;
+ 
+     WP<CMonitorFrameScheduler> m_self;
+ 
+diff --git a/src/protocols/Screencopy.cpp b/src/protocols/Screencopy.cpp
+index 687c4045..e444716d 100644
+--- a/src/protocols/Screencopy.cpp
++++ b/src/protocols/Screencopy.cpp
+@@ -330,10 +330,17 @@ void CScreencopyFrame::copyDmabuf(std::function<void(bool)> callback) {
+ 
+     g_pHyprOpenGL->m_renderData.blockScreenShader = true;
+ 
+-    g_pHyprRenderer->endRender([callback]() {
++    g_pHyprRenderer->endRender();
++
++    if (m_monitor->m_inFence.isValid()) {
++        g_pEventLoopManager->doOnReadable(m_monitor->m_inFence.duplicate(), [callback] {
++            LOGM(TRACE, "Copied frame via dma with explicit sync");
++            callback(true);
++        });
++    } else {
+         LOGM(TRACE, "Copied frame via dma");
+         callback(true);
+-    });
++    }
+ }
+ 
+ bool CScreencopyFrame::copyShm() {
+diff --git a/src/protocols/types/Buffer.hpp b/src/protocols/types/Buffer.hpp
+index f85670ef..f11ad726 100644
+--- a/src/protocols/types/Buffer.hpp
++++ b/src/protocols/types/Buffer.hpp
+@@ -9,6 +9,7 @@
+ 
+ class CSyncReleaser;
+ class CHLBufferReference;
++class CEGLSync;
+ 
+ class IHLBuffer : public Aquamarine::IBuffer {
+   public:
+@@ -31,6 +32,7 @@ class IHLBuffer : public Aquamarine::IBuffer {
+     SP<CWLBufferResource>                 m_resource;
+     std::vector<UP<CSyncReleaser>>        m_syncReleasers;
+     Hyprutils::OS::CFileDescriptor        m_syncFd;
++		UP<CEGLSync>                          m_eglSync;
+ 
+     struct {
+         CHyprSignalListener backendRelease;
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index 02da142f..016332de 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -3418,17 +3418,7 @@ UP<CEGLSync> CEGLSync::create() {
+         return nullptr;
+     }
+ 
+-    // we need to flush otherwise we might not get a valid fd
+-    glFlush();
+-
+-    int fd = g_pHyprOpenGL->m_proc.eglDupNativeFenceFDANDROID(g_pHyprOpenGL->m_eglDisplay, sync);
+-    if (fd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+-        Debug::log(ERR, "eglDupNativeFenceFDANDROID failed");
+-        return nullptr;
+-    }
+-
+     UP<CEGLSync> eglSync(new CEGLSync);
+-    eglSync->m_fd    = CFileDescriptor(fd);
+     eglSync->m_sync  = sync;
+     eglSync->m_valid = true;
+ 
+@@ -3443,6 +3433,24 @@ CEGLSync::~CEGLSync() {
+         Debug::log(ERR, "eglDestroySyncKHR failed");
+ }
+ 
++void CEGLSync::dupNativeFence(bool flush) {
++    if (m_sync == EGL_NO_SYNC_KHR) {
++        Debug::log(ERR, "eglDupNativeFenceFDANDROID failed, no valid EGLSyncKHR");
++        return;
++    }
++
++    if (flush)
++        glFlush(); // we need to flush otherwise we might not get a valid fd
++
++    int fd = g_pHyprOpenGL->m_proc.eglDupNativeFenceFDANDROID(g_pHyprOpenGL->m_eglDisplay, m_sync);
++    if (fd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
++        Debug::log(ERR, "eglDupNativeFenceFDANDROID failed");
++        return;
++    }
++
++    m_fd = CFileDescriptor(fd);
++}
++
+ CFileDescriptor& CEGLSync::fd() {
+     return m_fd;
+ }
+diff --git a/src/render/OpenGL.hpp b/src/render/OpenGL.hpp
+index 45ed28dd..88087aed 100644
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -153,9 +153,9 @@ struct SCurrentRenderData {
+ class CEGLSync {
+   public:
+     static UP<CEGLSync> create();
+-
+     ~CEGLSync();
+ 
++    void                             dupNativeFence(bool flush = false);
+     Hyprutils::OS::CFileDescriptor&  fd();
+     Hyprutils::OS::CFileDescriptor&& takeFd();
+     bool                             isValid();
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 8bb50c38..75a924b5 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -1632,6 +1632,27 @@ bool CHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor) {
+         }
+     }
+ 
++    if (!g_pHyprOpenGL->explicitSyncSupported()) {
++        m_usedAsyncBuffers.clear(); // release all buffer refs and hope implicit sync works
++    } else {
++        glFlush(); // flush once for the native fence FD's.
++        for (auto const& buf : m_usedAsyncBuffers) {
++            buf->m_eglSync->dupNativeFence();
++            if (buf->m_syncReleasers.empty()) {
++                g_pEventLoopManager->doOnReadable(buf->m_eglSync->fd().duplicate(), [buffer = std::move(buf)] {
++                    // drop buffer on out of scope.
++                });
++                continue;
++            } else {
++                for (const auto& releaser : buf->m_syncReleasers) {
++                    releaser->addSyncFileFd(buf->m_eglSync->fd());
++                }
++            }
++        }
++
++        m_usedAsyncBuffers.clear();
++    }
++
+     return ok;
+ }
+ 
+@@ -2295,7 +2316,7 @@ bool CHyprRenderer::beginRender(PHLMONITOR pMonitor, CRegion& damage, eRenderMod
+     return true;
+ }
+ 
+-void CHyprRenderer::endRender(const std::function<void()>& renderingDoneCallback) {
++void CHyprRenderer::endRender() {
+     const auto  PMONITOR           = g_pHyprOpenGL->m_renderData.pMonitor;
+     static auto PNVIDIAANTIFLICKER = CConfigValue<Hyprlang::INT>("opengl:nvidia_anti_flicker");
+ 
+@@ -2331,42 +2352,19 @@ void CHyprRenderer::endRender(const std::function<void()>& renderingDoneCallback
+         else
+             glFlush(); // mark an implicit sync point
+ 
+-        m_usedAsyncBuffers.clear(); // release all buffer refs and hope implicit sync works
+-        if (renderingDoneCallback)
+-            renderingDoneCallback();
+-
+         return;
+     }
+ 
+     UP<CEGLSync> eglSync = CEGLSync::create();
++    eglSync->dupNativeFence(true);
+     if (eglSync && eglSync->isValid()) {
+-        for (auto const& buf : m_usedAsyncBuffers) {
+-            for (const auto& releaser : buf->m_syncReleasers) {
+-                releaser->addSyncFileFd(eglSync->fd());
+-            }
+-        }
+-
+-        // release buffer refs with release points now, since syncReleaser handles actual buffer release based on EGLSync
+-        std::erase_if(m_usedAsyncBuffers, [](const auto& buf) { return !buf->m_syncReleasers.empty(); });
+-
+-        // release buffer refs without release points when EGLSync sync_file/fence is signalled
+-        g_pEventLoopManager->doOnReadable(eglSync->fd().duplicate(), [renderingDoneCallback, prevbfs = std::move(m_usedAsyncBuffers)]() mutable {
+-            prevbfs.clear();
+-            if (renderingDoneCallback)
+-                renderingDoneCallback();
+-        });
+-        m_usedAsyncBuffers.clear();
+-
+         if (m_renderMode == RENDER_MODE_NORMAL) {
+             PMONITOR->m_inFence = eglSync->takeFd();
+             PMONITOR->m_output->state->setExplicitInFence(PMONITOR->m_inFence.get());
+         }
+     } else {
+         Debug::log(ERR, "renderer: Explicit sync failed, releasing resources");
+-
+         m_usedAsyncBuffers.clear(); // release all buffer refs and hope implicit sync works
+-        if (renderingDoneCallback)
+-            renderingDoneCallback();
+     }
+ }
+ 
+diff --git a/src/render/Renderer.hpp b/src/render/Renderer.hpp
+index 1980984d..849a39b7 100644
+--- a/src/render/Renderer.hpp
++++ b/src/render/Renderer.hpp
+@@ -91,7 +91,7 @@ class CHyprRenderer {
+     // if RENDER_MODE_NORMAL, provided damage will be written to.
+     // otherwise, it will be the one used.
+     bool beginRender(PHLMONITOR pMonitor, CRegion& damage, eRenderMode mode = RENDER_MODE_NORMAL, SP<IHLBuffer> buffer = {}, CFramebuffer* fb = nullptr, bool simple = false);
+-    void endRender(const std::function<void()>& renderingDoneCallback = {});
++    void endRender();
+ 
+     bool m_bBlockSurfaceFeedback = false;
+     bool m_bRenderingSnapshot    = false;
+diff --git a/src/render/pass/SurfacePassElement.cpp b/src/render/pass/SurfacePassElement.cpp
+index 36b9e5f9..38cecfe6 100644
+--- a/src/render/pass/SurfacePassElement.cpp
++++ b/src/render/pass/SurfacePassElement.cpp
+@@ -154,8 +154,10 @@ void CSurfacePassElement::draw(const CRegion& damage) {
+ 
+     // add async (dmabuf) buffers to usedBuffers so we can handle release later
+     // sync (shm) buffers will be released in commitState, so no need to track them here
+-    if (m_data.surface->m_current.buffer && !m_data.surface->m_current.buffer->isSynchronous())
++    if (m_data.surface->m_current.buffer && !m_data.surface->m_current.buffer->isSynchronous()) {
++        m_data.surface->m_current.buffer->m_eglSync = CEGLSync::create(); // create a EGLSyncKHR just after the surface has been drawn.
+         g_pHyprRenderer->m_usedAsyncBuffers.emplace_back(m_data.surface->m_current.buffer);
++    }
+ 
+     g_pHyprOpenGL->blend(true);
+ }

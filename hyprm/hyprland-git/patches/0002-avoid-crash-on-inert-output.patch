@@ -1,0 +1,24 @@
+From 703394affb35392426a4293e93437169579c36a1 Mon Sep 17 00:00:00 2001
+From: Vaxry <vaxry@vaxry.net>
+Date: Tue, 25 Nov 2025 13:35:25 +0000
+Subject: [PATCH] protocols/workspace: avoid crash on inert outputs
+
+---
+ src/protocols/ExtWorkspace.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/protocols/ExtWorkspace.cpp b/src/protocols/ExtWorkspace.cpp
+index a0b570ebd92..bc4402f0556 100644
+--- a/src/protocols/ExtWorkspace.cpp
++++ b/src/protocols/ExtWorkspace.cpp
+@@ -22,6 +22,9 @@ CExtWorkspaceGroupResource::CExtWorkspaceGroupResource(WP<CExtWorkspaceManagerRe
+ 
+     m_resource->sendCapabilities(sc<extWorkspaceGroupHandleV1GroupCapabilities>(0));
+ 
++    if (!PROTO::outputs.contains(m_monitor->m_name))
++        return;
++
+     const auto& output = PROTO::outputs.at(m_monitor->m_name);
+ 
+     if (auto resource = output->outputResourceFrom(m_resource->client()))
+

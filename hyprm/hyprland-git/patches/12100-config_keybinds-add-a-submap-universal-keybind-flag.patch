@@ -1,0 +1,265 @@
+diff --git a/hyprtester/src/tests/main/keybinds.cpp b/hyprtester/src/tests/main/keybinds.cpp
+index 4e22474995a..a2fe2f37aca 100644
+--- a/hyprtester/src/tests/main/keybinds.cpp
++++ b/hyprtester/src/tests/main/keybinds.cpp
+@@ -34,6 +34,17 @@ static bool checkFlag() {
+     return exists;
+ }
+ 
++static bool attemptCheckFlag(int attempts, int intervalMs) {
++    for (int i = 0; i < attempts; i++) {
++        if (checkFlag())
++            return true;
++
++        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
++    }
++
++    return false;
++}
++
+ static std::string readKittyOutput() {
+     std::string output = Tests::execAndGet("kitten @ --to unix:/tmp/hyprtester-kitty.sock get-text --extent all");
+     // chop off shell prompt
+@@ -443,6 +454,34 @@ static void testSubmap() {
+     Tests::killAllWindows();
+ }
+ 
++static void testSubmapUniversal() {
++    NLog::log("{}Testing submap universal", Colors::GREEN);
++
++    EXPECT(checkFlag(), false);
++    EXPECT(getFromSocket("/keyword bindu SUPER,Y,exec,touch " + flagFile), "ok");
++    EXPECT_CONTAINS(getFromSocket("/submap"), "default");
++
++    // keybind works on default submap
++    OK(getFromSocket("/dispatch plugin:test:keybind 1,7,29"));
++    OK(getFromSocket("/dispatch plugin:test:keybind 0,7,29"));
++    EXPECT(attemptCheckFlag(30, 5), true);
++
++    // keybind works on submap1
++    getFromSocket("/dispatch plugin:test:keybind 1,7,30");
++    getFromSocket("/dispatch plugin:test:keybind 0,7,30");
++    EXPECT_CONTAINS(getFromSocket("/submap"), "submap1");
++    OK(getFromSocket("/dispatch plugin:test:keybind 1,7,29"));
++    OK(getFromSocket("/dispatch plugin:test:keybind 0,7,29"));
++    EXPECT(attemptCheckFlag(30, 5), true);
++
++    // reset to default submap
++    getFromSocket("/dispatch plugin:test:keybind 1,0,33");
++    getFromSocket("/dispatch plugin:test:keybind 0,0,33");
++    EXPECT_CONTAINS(getFromSocket("/submap"), "default");
++
++    EXPECT(getFromSocket("/keyword unbind SUPER,Y"), "ok");
++}
++
+ static bool test() {
+     NLog::log("{}Testing keybinds", Colors::GREEN);
+ 
+@@ -462,8 +501,8 @@ static bool test() {
+     testShortcutLongPressKeyRelease();
+     testShortcutRepeat();
+     testShortcutRepeatKeyRelease();
+-
+     testSubmap();
++    testSubmapUniversal();
+ 
+     clearFlag();
+     return !ret;
+diff --git a/src/config/ConfigManager.cpp b/src/config/ConfigManager.cpp
+index 151941fe3bd..283f1d3c5c8 100644
+--- a/src/config/ConfigManager.cpp
++++ b/src/config/ConfigManager.cpp
+@@ -2549,52 +2549,45 @@ std::optional<std::string> CConfigManager::handleBind(const std::string& command
+     // bind[fl]=SUPER,G,exec,dmenu_run <args>
+ 
+     // flags
+-    bool       locked         = false;
+-    bool       release        = false;
+-    bool       repeat         = false;
+-    bool       mouse          = false;
+-    bool       nonConsuming   = false;
+-    bool       transparent    = false;
+-    bool       ignoreMods     = false;
+-    bool       multiKey       = false;
+-    bool       longPress      = false;
+-    bool       hasDescription = false;
+-    bool       dontInhibit    = false;
+-    bool       click          = false;
+-    bool       drag           = false;
+-    const auto BINDARGS       = command.substr(4);
++    bool       locked          = false;
++    bool       release         = false;
++    bool       repeat          = false;
++    bool       mouse           = false;
++    bool       nonConsuming    = false;
++    bool       transparent     = false;
++    bool       ignoreMods      = false;
++    bool       multiKey        = false;
++    bool       longPress       = false;
++    bool       hasDescription  = false;
++    bool       dontInhibit     = false;
++    bool       click           = false;
++    bool       drag            = false;
++    bool       submapUniversal = false;
++    const auto BINDARGS        = command.substr(4);
+ 
+     for (auto const& arg : BINDARGS) {
+-        if (arg == 'l') {
+-            locked = true;
+-        } else if (arg == 'r') {
+-            release = true;
+-        } else if (arg == 'e') {
+-            repeat = true;
+-        } else if (arg == 'm') {
+-            mouse = true;
+-        } else if (arg == 'n') {
+-            nonConsuming = true;
+-        } else if (arg == 't') {
+-            transparent = true;
+-        } else if (arg == 'i') {
+-            ignoreMods = true;
+-        } else if (arg == 's') {
+-            multiKey = true;
+-        } else if (arg == 'o') {
+-            longPress = true;
+-        } else if (arg == 'd') {
+-            hasDescription = true;
+-        } else if (arg == 'p') {
+-            dontInhibit = true;
+-        } else if (arg == 'c') {
+-            click   = true;
+-            release = true;
+-        } else if (arg == 'g') {
+-            drag    = true;
+-            release = true;
+-        } else {
+-            return "bind: invalid flag";
++        switch (arg) {
++            case 'l': locked = true; break;
++            case 'r': release = true; break;
++            case 'e': repeat = true; break;
++            case 'm': mouse = true; break;
++            case 'n': nonConsuming = true; break;
++            case 't': transparent = true; break;
++            case 'i': ignoreMods = true; break;
++            case 's': multiKey = true; break;
++            case 'o': longPress = true; break;
++            case 'd': hasDescription = true; break;
++            case 'p': dontInhibit = true; break;
++            case 'c':
++                click   = true;
++                release = true;
++                break;
++            case 'g':
++                drag    = true;
++                release = true;
++                break;
++            case 'u': submapUniversal = true; break;
++            default: return "bind: invalid flag";
+         }
+     }
+ 
+@@ -2667,7 +2660,7 @@ std::optional<std::string> CConfigManager::handleBind(const std::string& command
+         g_pKeybindManager->addKeybind(SKeybind{parsedKey.key, KEYSYMS,      parsedKey.keycode, parsedKey.catchAll, MOD,      MODS,           HANDLER,
+                                                COMMAND,       locked,       m_currentSubmap,   DESCRIPTION,        release,  repeat,         longPress,
+                                                mouse,         nonConsuming, transparent,       ignoreMods,         multiKey, hasDescription, dontInhibit,
+-                                               click,         drag});
++                                               click,         drag,         submapUniversal});
+     }
+ 
+     return {};
+diff --git a/src/debug/HyprCtl.cpp b/src/debug/HyprCtl.cpp
+index ebf7acd6868..4cceca568e2 100644
+--- a/src/debug/HyprCtl.cpp
++++ b/src/debug/HyprCtl.cpp
+@@ -1018,6 +1018,7 @@ static std::string bindsRequest(eHyprCtlOutputFormat format, std::string request
+     "has_description": {},
+     "modmask": {},
+     "submap": "{}",
++    "submap_universal": "{}",
+     "key": "{}",
+     "keycode": {},
+     "catch_all": {},
+@@ -1026,8 +1027,9 @@ static std::string bindsRequest(eHyprCtlOutputFormat format, std::string request
+     "arg": "{}"
+ }},)#",
+                 kb->locked ? "true" : "false", kb->mouse ? "true" : "false", kb->release ? "true" : "false", kb->repeat ? "true" : "false", kb->longPress ? "true" : "false",
+-                kb->nonConsuming ? "true" : "false", kb->hasDescription ? "true" : "false", kb->modmask, escapeJSONStrings(kb->submap.name), escapeJSONStrings(kb->key),
+-                kb->keycode, kb->catchAll ? "true" : "false", escapeJSONStrings(kb->description), escapeJSONStrings(kb->handler), escapeJSONStrings(kb->arg));
++                kb->nonConsuming ? "true" : "false", kb->hasDescription ? "true" : "false", kb->modmask, escapeJSONStrings(kb->submap.name), kb->submapUniversal,
++                escapeJSONStrings(kb->key), kb->keycode, kb->catchAll ? "true" : "false", escapeJSONStrings(kb->description), escapeJSONStrings(kb->handler),
++                escapeJSONStrings(kb->arg));
+         }
+         trimTrailingComma(ret);
+         ret += "]";
+diff --git a/src/managers/KeybindManager.cpp b/src/managers/KeybindManager.cpp
+index d04d6ba711c..47b6e7f6fc9 100644
+--- a/src/managers/KeybindManager.cpp
++++ b/src/managers/KeybindManager.cpp
+@@ -680,7 +680,7 @@ SDispatchResult CKeybindManager::handleKeybinds(const uint32_t modmask, const SP
+         if (!k->locked && g_pSessionLockManager->isSessionLocked())
+             continue;
+ 
+-        if (!IGNORECONDITIONS && ((modmask != k->modmask && !k->ignoreMods) || k->submap != m_currentSelectedSubmap || k->shadowed))
++        if (!IGNORECONDITIONS && ((modmask != k->modmask && !k->ignoreMods) || (k->submap != m_currentSelectedSubmap && !k->submapUniversal) || k->shadowed))
+             continue;
+ 
+         if (k->multiKey) {
+diff --git a/src/managers/KeybindManager.hpp b/src/managers/KeybindManager.hpp
+index 592588b54da..e3433a1003e 100644
+--- a/src/managers/KeybindManager.hpp
++++ b/src/managers/KeybindManager.hpp
+@@ -26,29 +26,30 @@ struct SSubmap {
+ };
+ 
+ struct SKeybind {
+-    std::string            key            = "";
+-    std::set<xkb_keysym_t> sMkKeys        = {};
+-    uint32_t               keycode        = 0;
+-    bool                   catchAll       = false;
+-    uint32_t               modmask        = 0;
+-    std::set<xkb_keysym_t> sMkMods        = {};
+-    std::string            handler        = "";
+-    std::string            arg            = "";
+-    bool                   locked         = false;
+-    SSubmap                submap         = {};
+-    std::string            description    = "";
+-    bool                   release        = false;
+-    bool                   repeat         = false;
+-    bool                   longPress      = false;
+-    bool                   mouse          = false;
+-    bool                   nonConsuming   = false;
+-    bool                   transparent    = false;
+-    bool                   ignoreMods     = false;
+-    bool                   multiKey       = false;
+-    bool                   hasDescription = false;
+-    bool                   dontInhibit    = false;
+-    bool                   click          = false;
+-    bool                   drag           = false;
++    std::string            key             = "";
++    std::set<xkb_keysym_t> sMkKeys         = {};
++    uint32_t               keycode         = 0;
++    bool                   catchAll        = false;
++    uint32_t               modmask         = 0;
++    std::set<xkb_keysym_t> sMkMods         = {};
++    std::string            handler         = "";
++    std::string            arg             = "";
++    bool                   locked          = false;
++    SSubmap                submap          = {};
++    std::string            description     = "";
++    bool                   release         = false;
++    bool                   repeat          = false;
++    bool                   longPress       = false;
++    bool                   mouse           = false;
++    bool                   nonConsuming    = false;
++    bool                   transparent     = false;
++    bool                   ignoreMods      = false;
++    bool                   multiKey        = false;
++    bool                   hasDescription  = false;
++    bool                   dontInhibit     = false;
++    bool                   click           = false;
++    bool                   drag            = false;
++    bool                   submapUniversal = false;
+ 
+     // DO NOT INITIALIZE
+     bool shadowed = false;

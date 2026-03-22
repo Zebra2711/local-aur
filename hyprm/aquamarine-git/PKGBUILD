@@ -1,0 +1,117 @@
+# Maintainer: dawfukfr <dawfukfr@gmail.com>
+# Maintainer: alba4k <blaskoazzolaaaron@gmail.com>
+# Contributor: Caleb Maclennan <caleb@alerque.com>
+
+_pkgname="aquamarine"
+pkgname="$_pkgname-git"
+pkgver=0.10.0.r29.gd67142c
+pkgrel=1
+pkgdesc="Aquamarine is a very light linux rendering backend library"
+arch=('x86_64' 'aarch64')
+url="https://github.com/hyprwm/$_pkgname"
+license=('BSD-3-Clause')
+
+depends=(
+  gcc-libs
+  glibc
+  hyprutils-git
+  hyprwayland-scanner-git
+  libdisplay-info
+  libdrm
+  libglvnd
+  libinput
+  mesa
+  opengl-driver
+  pixman
+  pugixml
+  seatd
+  systemd-libs
+  wayland
+  wayland-protocols
+)
+
+makedepends=(
+  cmake
+  git
+  ninja
+)
+
+provides=("$_pkgname=${pkgver%%.r*}")
+conflicts=("$_pkgname")
+
+_pkgsrc=$_pkgname
+_url_patches=https://patch-diff.githubusercontent.com/raw/hyprwm/aquamarine/pull
+source=("$_pkgsrc::git+$url.git"
+        "199.patch")
+sha256sums=('SKIP'
+            'SKIP')
+
+pkgver() {
+  cd "$_pkgsrc"
+  git describe --long --tags --abbrev=7 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+declare -g _patches=(
+  [199]="renderer: ensure makecurrent isnt called twice"
+  #[237]="drm: fallback to first render node for non-standard buses"
+  #[241]="drm: make pageflips drive the frames"
+)
+
+
+if [[ ${#_patches[@]} -gt 0 ]]; then
+    for mr in "${!_patches[@]}"; do
+        desc=$(echo "${_patches[$mr]}" | tr " " "-" | tr -d ":." | tr "/" "_")
+        filepath="${mr}-${desc}.patch"
+        source+=("$filepath::${_url_patches}/${mr}.diff")
+        local checksum="$(sha256sum "$filepath" | awk '{print $1}')" || "SKIP"
+        sha256sums+=($checksum)
+    done
+fi
+
+prepare() {
+  cd "$_pkgsrc"
+  # patch -Np1 < "$srcdir/199.patch"
+  # patch -Np1 < "$startdir/236.patch"
+
+  local skip=('subprojects/*' 'flake.lock' '.github/*' 'nix/*')
+  # local filter=(-p1 "${_skip[@]/#/-x }")
+  local filter="-p1"
+  for diff in "${skip[@]}"; do
+    filter+=" -x '$diff'"
+  done
+  for mr in "${!_patches[@]}"; do
+    msg2 "${mr}: ${_patches[${mr}]}"
+    desc=$(echo "${_patches[$mr]}" | tr " " "-" | tr -d ":." | tr "/" "_")
+    local file="$srcdir/${mr}-${desc}.patch"
+    local patch_cmd="filterdiff ${filter} \"$file\" | patch --no-backup-if-mismatch -Np1"
+
+    # Test if patch applies cleanly with --dry-run
+    if ! eval "$patch_cmd --dry-run" &>/dev/null; then
+      error "Patch ${mr} will fail to apply"
+      [[ -n "$(git status --porcelain)" ]] && git add . && git commit -m "Applied patches before ${mr} failure"
+      eval "$patch_cmd" || true
+      find . -name "*.rej" -exec catdiff {} \;
+      return 1
+    fi
+    eval "$patch_cmd"
+  done
+
+}
+
+build() {
+  local cmake_options=(
+    -B build
+    -S "$_pkgsrc"
+    -G Ninja
+    -W no-dev
+    -D CMAKE_BUILD_TYPE=None
+    -D CMAKE_INSTALL_PREFIX=/usr
+  )
+  cmake "${cmake_options[@]}"
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 "$_pkgsrc/LICENSE" -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

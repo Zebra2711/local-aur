@@ -1,0 +1,1314 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 62405bf2c..195ac99ce 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -450,6 +450,8 @@ protocolnew("staging/xdg-system-bell" "xdg-system-bell-v1" false)
+ protocolnew("staging/ext-workspace" "ext-workspace-v1" false)
+ protocolnew("staging/ext-data-control" "ext-data-control-v1" false)
+ protocolnew("staging/pointer-warp" "pointer-warp-v1" false)
++protocolnew("staging/fifo" "fifo-v1" false)
++protocolnew("staging/commit-timing" "commit-timing-v1" false)
+ 
+ protocolwayland()
+ 
+diff --git a/protocols/meson.build b/protocols/meson.build
+index dc23eaa17..33663fa38 100644
+--- a/protocols/meson.build
++++ b/protocols/meson.build
+@@ -78,6 +78,8 @@ protocols = [
+ 	wayland_protocol_dir / 'staging/ext-workspace/ext-workspace-v1.xml',
+ 	wayland_protocol_dir / 'staging/ext-data-control/ext-data-control-v1.xml',
+ 	wayland_protocol_dir / 'staging/pointer-warp/pointer-warp-v1.xml',
++	wayland_protocol_dir / 'staging/fifo/fifo-v1.xml',
++	wayland_protocol_dir / 'staging/commit-timing/commit-timing-v1.xml',
+ ]
+ 
+ wl_protocols = []
+diff --git a/src/helpers/Monitor.cpp b/src/helpers/Monitor.cpp
+index ac9c065f0..56bf4b479 100644
+--- a/src/helpers/Monitor.cpp
++++ b/src/helpers/Monitor.cpp
+@@ -139,6 +139,8 @@ void CMonitor::onConnect(bool noRule) {
+         }
+ 
+         m_frameScheduler->onPresented();
++
++        m_events.presented.emit();
+     });
+ 
+     m_listeners.destroy = m_output->events.destroy.listen([this] {
+diff --git a/src/helpers/Monitor.hpp b/src/helpers/Monitor.hpp
+index 687fc049f..432ac4229 100644
+--- a/src/helpers/Monitor.hpp
++++ b/src/helpers/Monitor.hpp
+@@ -203,6 +203,7 @@ class CMonitor {
+         CSignalT<> disconnect;
+         CSignalT<> dpmsChanged;
+         CSignalT<> modeChanged;
++        CSignalT<> presented;
+     } m_events;
+ 
+     std::array<std::vector<PHLLSREF>, 4> m_layerSurfaceLayers;
+diff --git a/src/managers/ProtocolManager.cpp b/src/managers/ProtocolManager.cpp
+index c9690abad..f9f90ffe1 100644
+--- a/src/managers/ProtocolManager.cpp
++++ b/src/managers/ProtocolManager.cpp
+@@ -65,6 +65,8 @@
+ #include "../protocols/ExtWorkspace.hpp"
+ #include "../protocols/ExtDataDevice.hpp"
+ #include "../protocols/PointerWarp.hpp"
++#include "../protocols/Fifo.hpp"
++#include "../protocols/CommitTiming.hpp"
+ 
+ #include "../helpers/Monitor.hpp"
+ #include "../render/Renderer.hpp"
+@@ -194,6 +196,8 @@ CProtocolManager::CProtocolManager() {
+     PROTO::extWorkspace        = makeUnique<CExtWorkspaceProtocol>(&ext_workspace_manager_v1_interface, 1, "ExtWorkspace");
+     PROTO::extDataDevice       = makeUnique<CExtDataDeviceProtocol>(&ext_data_control_manager_v1_interface, 1, "ExtDataDevice");
+     PROTO::pointerWarp         = makeUnique<CPointerWarpProtocol>(&wp_pointer_warp_v1_interface, 1, "PointerWarp");
++    PROTO::fifo                = makeUnique<CFifoProtocol>(&wp_fifo_manager_v1_interface, 1, "Fifo");
++    PROTO::commitTiming        = makeUnique<CCommitTimingProtocol>(&wp_commit_timing_manager_v1_interface, 1, "CommitTiming");
+ 
+     if (*PENABLECM)
+         PROTO::colorManagement = makeUnique<CColorManagementProtocol>(&wp_color_manager_v1_interface, 1, "ColorManagement", *PDEBUGCM);
+@@ -298,6 +302,8 @@ CProtocolManager::~CProtocolManager() {
+     PROTO::extWorkspace.reset();
+     PROTO::extDataDevice.reset();
+     PROTO::pointerWarp.reset();
++    PROTO::fifo.reset();
++    PROTO::commitTiming.reset();
+ 
+     for (auto& [_, lease] : PROTO::lease) {
+         lease.reset();
+@@ -353,6 +359,8 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
+ 		PROTO::hyprlandSurface->getGlobal(),
+ 		PROTO::xdgTag->getGlobal(),
+ 		PROTO::xdgBell->getGlobal(),
++        PROTO::fifo->getGlobal(),
++        PROTO::commitTiming->getGlobal(),
+         PROTO::sync     ? PROTO::sync->getGlobal()      : nullptr,
+         PROTO::mesaDRM  ? PROTO::mesaDRM->getGlobal()   : nullptr,
+         PROTO::linuxDma ? PROTO::linuxDma->getGlobal()  : nullptr,
+diff --git a/src/protocols/CommitTiming.cpp b/src/protocols/CommitTiming.cpp
+new file mode 100644
+index 000000000..2fcd8e9cb
+--- /dev/null
++++ b/src/protocols/CommitTiming.cpp
+@@ -0,0 +1,140 @@
++#include "CommitTiming.hpp"
++#include "core/Compositor.hpp"
++#include "../managers/eventLoop/EventLoopManager.hpp"
++#include "../managers/eventLoop/EventLoopTimer.hpp"
++
++CCommitTimerResource::CCommitTimerResource(UP<CWpCommitTimerV1>&& resource_, SP<CWLSurfaceResource> surface) : m_resource(std::move(resource_)), m_surface(surface) {
++    if UNLIKELY (!m_resource->resource())
++        return;
++
++    m_resource->setData(this);
++    m_resource->setDestroy([this](CWpCommitTimerV1* r) { PROTO::commitTiming->destroyResource(this); });
++    m_resource->setOnDestroy([this](CWpCommitTimerV1* r) { PROTO::commitTiming->destroyResource(this); });
++
++    m_resource->setSetTimestamp([this](CWpCommitTimerV1* r, uint32_t tvHi, uint32_t tvLo, uint32_t tvNsec) {
++        return;
++
++        if (!m_surface) {
++            r->error(WP_COMMIT_TIMER_V1_ERROR_SURFACE_DESTROYED, "Surface was gone");
++            return;
++        }
++
++        if (m_pendingTimeout.has_value()) {
++            r->error(WP_COMMIT_TIMER_V1_ERROR_TIMESTAMP_EXISTS, "Timestamp is already set");
++            return;
++        }
++
++        timespec ts;
++        ts.tv_sec  = (((uint64_t)tvHi) << 32) | (uint64_t)tvLo;
++        ts.tv_nsec = tvNsec;
++
++        const auto TIME     = Time::fromTimespec(&ts);
++        const auto TIME_NOW = Time::steadyNow();
++
++        if (TIME_NOW > TIME) {
++            // TODO: should we err here?
++            // for now just do nothing I guess, thats some lag.
++            m_pendingTimeout = Time::steady_dur::min();
++        } else
++            m_pendingTimeout = TIME - TIME_NOW;
++    });
++
++    m_listeners.surfaceStateCommit = m_surface->m_events.stateCommit2.listen([this](auto state) {
++        if (!m_pendingTimeout.has_value())
++            return;
++
++        m_surface->m_stateQueue.lock(state, LOCK_REASON_TIMER);
++
++        if (!m_timerPresent) {
++            m_timerPresent = true;
++            timer          = makeShared<CEventLoopTimer>(
++                m_pendingTimeout,
++                [this](SP<CEventLoopTimer> self, void* data) {
++                    if (!m_surface)
++                        return;
++
++                    m_surface->m_stateQueue.unlockFirst(LOCK_REASON_TIMER);
++                },
++                nullptr);
++        } else
++            timer->updateTimeout(m_pendingTimeout);
++
++        m_pendingTimeout.reset();
++    });
++}
++
++CCommitTimerResource::~CCommitTimerResource() {
++    ;
++}
++
++bool CCommitTimerResource::good() {
++    return m_resource->resource();
++}
++
++CCommitTimingManagerResource::CCommitTimingManagerResource(UP<CWpCommitTimingManagerV1>&& resource_) : m_resource(std::move(resource_)) {
++    if UNLIKELY (!m_resource->resource())
++        return;
++
++    m_resource->setData(this);
++    m_resource->setDestroy([this](CWpCommitTimingManagerV1* r) { PROTO::commitTiming->destroyResource(this); });
++    m_resource->setOnDestroy([this](CWpCommitTimingManagerV1* r) { PROTO::commitTiming->destroyResource(this); });
++
++    m_resource->setGetTimer([](CWpCommitTimingManagerV1* r, uint32_t id, wl_resource* surfResource) {
++        if (!surfResource) {
++            r->error(-1, "No resource for commit timing");
++            return;
++        }
++
++        auto surf = CWLSurfaceResource::fromResource(surfResource);
++
++        if (!surf) {
++            r->error(-1, "No surface for commit timing");
++            return;
++        }
++
++        if (surf->m_commitTimer) {
++            r->error(WP_COMMIT_TIMING_MANAGER_V1_ERROR_COMMIT_TIMER_EXISTS, "Surface already has a commit timing");
++            return;
++        }
++
++        const auto& RESOURCE = PROTO::commitTiming->m_timers.emplace_back(makeUnique<CCommitTimerResource>(makeUnique<CWpCommitTimerV1>(r->client(), r->version(), id), surf));
++
++        if (!RESOURCE->good()) {
++            r->noMemory();
++            PROTO::commitTiming->m_timers.pop_back();
++            return;
++        }
++
++        surf->m_commitTimer = RESOURCE;
++    });
++}
++
++CCommitTimingManagerResource::~CCommitTimingManagerResource() {
++    ;
++}
++
++bool CCommitTimingManagerResource::good() {
++    return m_resource->resource();
++}
++
++CCommitTimingProtocol::CCommitTimingProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
++    ;
++}
++
++void CCommitTimingProtocol::bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id) {
++    const auto RESOURCE = m_managers.emplace_back(makeUnique<CCommitTimingManagerResource>(makeUnique<CWpCommitTimingManagerV1>(client, ver, id))).get();
++
++    if (!RESOURCE->good()) {
++        wl_client_post_no_memory(client);
++        m_managers.pop_back();
++        return;
++    }
++}
++
++void CCommitTimingProtocol::destroyResource(CCommitTimingManagerResource* res) {
++    std::erase_if(m_managers, [&](const auto& other) { return other.get() == res; });
++}
++
++void CCommitTimingProtocol::destroyResource(CCommitTimerResource* res) {
++    std::erase_if(m_timers, [&](const auto& other) { return other.get() == res; });
++}
+diff --git a/src/protocols/CommitTiming.hpp b/src/protocols/CommitTiming.hpp
+new file mode 100644
+index 000000000..e79face8c
+--- /dev/null
++++ b/src/protocols/CommitTiming.hpp
+@@ -0,0 +1,67 @@
++#pragma once
++
++#include <vector>
++#include <unordered_map>
++#include "WaylandProtocol.hpp"
++#include "commit-timing-v1.hpp"
++
++#include "../helpers/signal/Signal.hpp"
++#include "helpers/time/Time.hpp"
++
++class CWLSurfaceResource;
++class CEventLoopTimer;
++
++class CCommitTimerResource {
++  public:
++    CCommitTimerResource(UP<CWpCommitTimerV1>&& resource_, SP<CWLSurfaceResource> surface);
++    ~CCommitTimerResource();
++
++    bool good();
++
++  private:
++    UP<CWpCommitTimerV1>            m_resource;
++    WP<CWLSurfaceResource>          m_surface;
++    bool                            m_timerPresent = false;
++    std::optional<Time::steady_dur> m_pendingTimeout;
++    SP<CEventLoopTimer>             timer;
++
++    struct {
++        CHyprSignalListener surfaceStateCommit;
++    } m_listeners;
++
++    friend class CCommitTimingProtocol;
++    friend class CCommitTimingManagerResource;
++};
++
++class CCommitTimingManagerResource {
++  public:
++    CCommitTimingManagerResource(UP<CWpCommitTimingManagerV1>&& resource_);
++    ~CCommitTimingManagerResource();
++
++    bool good();
++
++  private:
++    UP<CWpCommitTimingManagerV1> m_resource;
++};
++
++class CCommitTimingProtocol : public IWaylandProtocol {
++  public:
++    CCommitTimingProtocol(const wl_interface* iface, const int& ver, const std::string& name);
++
++    virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
++
++  private:
++    void destroyResource(CCommitTimingManagerResource* resource);
++    void destroyResource(CCommitTimerResource* resource);
++
++    //
++    std::vector<UP<CCommitTimingManagerResource>> m_managers;
++    std::vector<UP<CCommitTimerResource>>         m_timers;
++
++    friend class CCommitTimingManagerResource;
++    friend class CCommitTimerResource;
++};
++
++namespace PROTO {
++    inline UP<CCommitTimingProtocol> commitTiming;
++};
+diff --git a/src/protocols/DRMSyncobj.cpp b/src/protocols/DRMSyncobj.cpp
+index 0896b9042..40869c0d6 100644
+--- a/src/protocols/DRMSyncobj.cpp
++++ b/src/protocols/DRMSyncobj.cpp
+@@ -74,38 +74,39 @@ CDRMSyncobjSurfaceResource::CDRMSyncobjSurfaceResource(UP<CWpLinuxDrmSyncobjSurf
+         m_pendingRelease = {timeline->m_timeline, (sc<uint64_t>(hi) << 32) | sc<uint64_t>(lo)};
+     });
+ 
+-    m_listeners.surfacePrecommit = m_surface->m_events.precommit.listen([this] {
+-        if (!m_surface->m_pending.updated.bits.buffer || !m_surface->m_pending.buffer) {
++    m_listeners.surfaceStateCommit = m_surface->m_events.stateCommit.listen([this](auto state) {
++        if (!state->updated.bits.buffer || !state->buffer) {
+             if (m_pendingAcquire.timeline() || m_pendingRelease.timeline()) {
+                 m_resource->error(WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_BUFFER, "Missing buffer");
+-                m_surface->m_pending.rejected = true;
++                state->rejected = true;
+             }
+             return;
+         }
+ 
+         if (!m_pendingAcquire.timeline()) {
+             m_resource->error(WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_ACQUIRE_POINT, "Missing acquire timeline");
+-            m_surface->m_pending.rejected = true;
++            state->rejected = true;
+             return;
+         }
+ 
+         if (!m_pendingRelease.timeline()) {
+             m_resource->error(WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_RELEASE_POINT, "Missing release timeline");
+-            m_surface->m_pending.rejected = true;
++            state->rejected = true;
+             return;
+         }
+ 
+         if (m_pendingAcquire.timeline() == m_pendingRelease.timeline() && m_pendingAcquire.point() >= m_pendingRelease.point()) {
+             m_resource->error(WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_CONFLICTING_POINTS, "Acquire and release points are on the same timeline, and acquire >= release");
+-            m_surface->m_pending.rejected = true;
++            state->rejected = true;
+             return;
+         }
+ 
+-        m_surface->m_pending.updated.bits.acquire = true;
+-        m_surface->m_pending.acquire              = m_pendingAcquire;
+-        m_pendingAcquire                          = {};
++        state->updated.bits.acquire = true;
++        state->acquire              = m_pendingAcquire;
++        m_surface->m_stateQueue.lock(state, LOCK_REASON_FENCE);
++        m_pendingAcquire = {};
+ 
+-        m_surface->m_pending.buffer->addReleasePoint(m_pendingRelease);
++        state->buffer->addReleasePoint(m_pendingRelease);
+         m_pendingRelease = {};
+     });
+ }
+diff --git a/src/protocols/DRMSyncobj.hpp b/src/protocols/DRMSyncobj.hpp
+index 36da4cce1..f91ace4cb 100644
+--- a/src/protocols/DRMSyncobj.hpp
++++ b/src/protocols/DRMSyncobj.hpp
+@@ -51,7 +51,7 @@ class CDRMSyncobjSurfaceResource {
+     CDRMSyncPointState              m_pendingRelease;
+ 
+     struct {
+-        CHyprSignalListener surfacePrecommit;
++        CHyprSignalListener surfaceStateCommit;
+     } m_listeners;
+ };
+ 
+diff --git a/src/protocols/Fifo.cpp b/src/protocols/Fifo.cpp
+new file mode 100644
+index 000000000..63ce8579d
+--- /dev/null
++++ b/src/protocols/Fifo.cpp
+@@ -0,0 +1,192 @@
++#include "Fifo.hpp"
++#include "Compositor.hpp"
++#include "core/Compositor.hpp"
++#include "../managers/HookSystemManager.hpp"
++#include "../helpers/Monitor.hpp"
++
++CFifoResource::CFifoResource(UP<CWpFifoV1>&& resource_, SP<CWLSurfaceResource> surface) : m_resource(std::move(resource_)), m_surface(surface) {
++    if UNLIKELY (!m_resource->resource())
++        return;
++
++    m_resource->setData(this);
++    m_resource->setDestroy([this](CWpFifoV1* r) { PROTO::fifo->destroyResource(this); });
++    m_resource->setOnDestroy([this](CWpFifoV1* r) { PROTO::fifo->destroyResource(this); });
++
++    m_resource->setSetBarrier([this](CWpFifoV1* r) {
++        if (!m_surface) {
++            r->error(WP_FIFO_V1_ERROR_SURFACE_DESTROYED, "Surface was gone");
++            return;
++        }
++
++        m_pending.barrierSet = true;
++    });
++
++    m_resource->setWaitBarrier([this](CWpFifoV1* r) {
++        if (!m_surface) {
++            r->error(WP_FIFO_V1_ERROR_SURFACE_DESTROYED, "Surface was gone");
++            return;
++        }
++
++        if (!m_pending.barrierSet)
++            return;
++
++        m_pending.surfaceLocked = true;
++    });
++
++    m_listeners.surfaceStateCommit = m_surface->m_events.stateCommit.listen([this](auto state) {
++        if (!m_pending.surfaceLocked)
++            return;
++
++        //#TODO:
++        // this feels wrong, but if we have no pending frames, presented might never come because
++        // we are waiting on the barrier to unlock and no damage is around.
++        if (m_surface->m_enteredOutputs.empty() && m_surface->m_hlSurface) {
++            for (auto& m : g_pCompositor->m_monitors) {
++                if (!m || !m->m_enabled)
++                    continue;
++
++                auto box = m_surface->m_hlSurface->getSurfaceBoxGlobal();
++                if (box && !box->intersection({m->m_position, m->m_size}).empty()) {
++                    if (m->m_tearingState.activelyTearing)
++                        return; // dont fifo lock on tearing.
++
++                    g_pCompositor->scheduleFrameForMonitor(m, Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
++                }
++            }
++        } else {
++            for (auto& m : m_surface->m_enteredOutputs) {
++                if (!m)
++                    continue;
++
++                if (m->m_tearingState.activelyTearing)
++                    return; // dont fifo lock on tearing.
++
++                g_pCompositor->scheduleFrameForMonitor(m.lock(), Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
++            }
++        }
++
++        // only lock once its mapped.
++        if (m_surface->m_mapped)
++            m_surface->m_stateQueue.lock(state, LOCK_REASON_FIFO);
++
++        m_pending = {};
++    });
++}
++
++CFifoResource::~CFifoResource() {
++    ;
++}
++
++bool CFifoResource::good() {
++    return m_resource->resource();
++}
++
++void CFifoResource::presented() {
++    m_surface->m_stateQueue.unlockFirst(LOCK_REASON_FIFO);
++}
++
++CFifoManagerResource::CFifoManagerResource(UP<CWpFifoManagerV1>&& resource_) : m_resource(std::move(resource_)) {
++    if UNLIKELY (!m_resource->resource())
++        return;
++
++    m_resource->setDestroy([this](CWpFifoManagerV1* r) { PROTO::fifo->destroyResource(this); });
++    m_resource->setOnDestroy([this](CWpFifoManagerV1* r) { PROTO::fifo->destroyResource(this); });
++
++    m_resource->setGetFifo([](CWpFifoManagerV1* r, uint32_t id, wl_resource* surfResource) {
++        if (!surfResource) {
++            r->error(-1, "No resource for fifo");
++            return;
++        }
++
++        auto surf = CWLSurfaceResource::fromResource(surfResource);
++
++        if (!surf) {
++            r->error(-1, "No surface for fifo");
++            return;
++        }
++
++        if (surf->m_fifo) {
++            r->error(WP_FIFO_MANAGER_V1_ERROR_ALREADY_EXISTS, "Surface already has a fifo");
++            return;
++        }
++
++        const auto& RESOURCE = PROTO::fifo->m_fifos.emplace_back(makeUnique<CFifoResource>(makeUnique<CWpFifoV1>(r->client(), r->version(), id), surf));
++
++        if (!RESOURCE->good()) {
++            r->noMemory();
++            PROTO::fifo->m_fifos.pop_back();
++            return;
++        }
++
++        surf->m_fifo = RESOURCE;
++        LOGM(LOG, "New fifo at {:x} for surface {:x}", (uintptr_t)RESOURCE, (uintptr_t)surf.get());
++    });
++}
++
++CFifoManagerResource::~CFifoManagerResource() {
++    ;
++}
++
++bool CFifoManagerResource::good() {
++    return m_resource->resource();
++}
++
++CFifoProtocol::CFifoProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
++    static auto P = g_pHookSystem->hookDynamic("monitorAdded", [this](void* self, SCallbackInfo& info, std::any param) {
++        auto M = std::any_cast<PHLMONITOR>(param);
++
++        M->m_events.presented.listenStatic([this, m = PHLMONITORREF{M}]() {
++            if (!m || !PROTO::fifo)
++                return;
++
++            onMonitorPresent(m.lock());
++        });
++    });
++}
++
++void CFifoProtocol::bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id) {
++    const auto RESOURCE = m_managers.emplace_back(makeUnique<CFifoManagerResource>(makeUnique<CWpFifoManagerV1>(client, ver, id))).get();
++
++    if (!RESOURCE->good()) {
++        wl_client_post_no_memory(client);
++        m_managers.pop_back();
++        return;
++    }
++}
++
++void CFifoProtocol::destroyResource(CFifoManagerResource* res) {
++    std::erase_if(m_managers, [&](const auto& other) { return other.get() == res; });
++}
++
++void CFifoProtocol::destroyResource(CFifoResource* res) {
++    std::erase_if(m_fifos, [&](const auto& other) { return other.get() == res; });
++}
++
++void CFifoProtocol::onMonitorPresent(PHLMONITOR m) {
++    if (m->m_tearingState.activelyTearing)
++        return; // fifo isnt locked on tearing.
++
++    for (const auto& fifo : m_fifos) {
++        if (!fifo->m_surface)
++            continue;
++
++        if (!fifo->m_surface->m_mapped) {
++            fifo->presented();
++            continue;
++        }
++
++        auto it = std::ranges::find_if(fifo->m_surface->m_enteredOutputs, [m](auto& mon) { return mon == m; });
++        if (it != fifo->m_surface->m_enteredOutputs.end()) {
++            fifo->presented();
++            continue;
++        }
++
++        if (fifo->m_surface->m_hlSurface) {
++            auto box = fifo->m_surface->m_hlSurface->getSurfaceBoxGlobal();
++            if (box && !box->intersection({m->m_position, m->m_size}).empty()) {
++                fifo->presented();
++                continue;
++            }
++        }
++    }
++}
+diff --git a/src/protocols/Fifo.hpp b/src/protocols/Fifo.hpp
+new file mode 100644
+index 000000000..8551e78cd
+--- /dev/null
++++ b/src/protocols/Fifo.hpp
+@@ -0,0 +1,74 @@
++#pragma once
++
++#include <vector>
++#include <unordered_map>
++#include "WaylandProtocol.hpp"
++#include "fifo-v1.hpp"
++
++#include "../helpers/signal/Signal.hpp"
++
++class CWLSurfaceResource;
++
++class CFifoResource {
++  public:
++    CFifoResource(UP<CWpFifoV1>&& resource_, SP<CWLSurfaceResource> surface);
++    ~CFifoResource();
++
++    bool good();
++
++  private:
++    UP<CWpFifoV1>          m_resource;
++
++    WP<CWLSurfaceResource> m_surface;
++
++    struct SState {
++        bool barrierSet    = false;
++        bool surfaceLocked = false;
++    };
++
++    SState m_pending;
++
++    struct {
++        CHyprSignalListener surfaceStateCommit;
++    } m_listeners;
++
++    void presented();
++
++    friend class CFifoProtocol;
++    friend class CFifoManagerResource;
++};
++
++class CFifoManagerResource {
++  public:
++    CFifoManagerResource(UP<CWpFifoManagerV1>&& resource_);
++    ~CFifoManagerResource();
++
++    bool good();
++
++  private:
++    UP<CWpFifoManagerV1> m_resource;
++};
++
++class CFifoProtocol : public IWaylandProtocol {
++  public:
++    CFifoProtocol(const wl_interface* iface, const int& ver, const std::string& name);
++
++    virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
++
++  private:
++    void destroyResource(CFifoManagerResource* resource);
++    void destroyResource(CFifoResource* resource);
++
++    void onMonitorPresent(PHLMONITOR m);
++
++    //
++    std::vector<UP<CFifoManagerResource>> m_managers;
++    std::vector<UP<CFifoResource>>        m_fifos;
++
++    friend class CFifoManagerResource;
++    friend class CFifoResource;
++};
++
++namespace PROTO {
++    inline UP<CFifoProtocol> fifo;
++};
+diff --git a/src/protocols/LinuxDMABUF.cpp b/src/protocols/LinuxDMABUF.cpp
+index 0ad804c38..c7de03a29 100644
+--- a/src/protocols/LinuxDMABUF.cpp
++++ b/src/protocols/LinuxDMABUF.cpp
+@@ -103,6 +103,9 @@ CLinuxDMABuffer::CLinuxDMABuffer(uint32_t id, wl_client* client, Aquamarine::SDM
+         m_listeners.bufferResourceDestroy.reset();
+         PROTO::linuxDma->destroyResource(this);
+     });
++
++    if (!m_buffer->m_success)
++        LOGM(ERR, "Possibly compositor bug: buffer failed to create");
+ }
+ 
+ CLinuxDMABuffer::~CLinuxDMABuffer() {
+@@ -214,7 +217,7 @@ void CLinuxDMABUFParamsResource::create(uint32_t id) {
+ 
+     auto& buf = PROTO::linuxDma->m_buffers.emplace_back(makeUnique<CLinuxDMABuffer>(id, m_resource->client(), *m_attrs));
+ 
+-    if UNLIKELY (!buf->good()) {
++    if UNLIKELY (!buf->good() || !buf->m_buffer->m_success) {
+         m_resource->sendFailed();
+         PROTO::linuxDma->m_buffers.pop_back();
+         return;
+diff --git a/src/protocols/MesaDRM.cpp b/src/protocols/MesaDRM.cpp
+index 7595d57f9..789f90b6c 100644
+--- a/src/protocols/MesaDRM.cpp
++++ b/src/protocols/MesaDRM.cpp
+@@ -18,6 +18,9 @@ CMesaDRMBufferResource::CMesaDRMBufferResource(uint32_t id, wl_client* client, A
+         m_listeners.bufferResourceDestroy.reset();
+         PROTO::mesaDRM->destroyResource(this);
+     });
++
++    if (!m_buffer->m_success)
++        LOGM(ERR, "Possibly compositor bug: buffer failed to create");
+ }
+ 
+ CMesaDRMBufferResource::~CMesaDRMBufferResource() {
+diff --git a/src/protocols/SinglePixel.cpp b/src/protocols/SinglePixel.cpp
+index 9abde68ab..6ca48a356 100644
+--- a/src/protocols/SinglePixel.cpp
++++ b/src/protocols/SinglePixel.cpp
+@@ -12,9 +12,16 @@ CSinglePixelBuffer::CSinglePixelBuffer(uint32_t id, wl_client* client, CHyprColo
+ 
+     m_opaque = col_.a >= 1.F;
+ 
++    m_texture = makeShared<CTexture>(DRM_FORMAT_ARGB8888, rc<uint8_t*>(&m_color), 4, Vector2D{1, 1});
++
+     m_resource = CWLBufferResource::create(makeShared<CWlBuffer>(client, 1, id));
+ 
++    m_success = m_texture->m_texID;
++
+     size = {1, 1};
++
++    if (!m_success)
++        Debug::log(ERR, "Failed creating a single pixel texture: null texture id");
+ }
+ 
+ CSinglePixelBuffer::~CSinglePixelBuffer() {
+@@ -50,17 +57,6 @@ void CSinglePixelBuffer::endDataPtr() {
+     ;
+ }
+ 
+-SP<CTexture> CSinglePixelBuffer::createTexture() {
+-    auto tex = makeShared<CTexture>(DRM_FORMAT_ARGB8888, rc<uint8_t*>(&m_color), 4, Vector2D{1, 1});
+-
+-    if (!tex->m_texID) {
+-        Debug::log(ERR, "Failed creating a single pixel texture: null texture id");
+-        return nullptr;
+-    }
+-
+-    return tex;
+-}
+-
+ bool CSinglePixelBuffer::good() {
+     return m_resource->good();
+ }
+diff --git a/src/protocols/SinglePixel.hpp b/src/protocols/SinglePixel.hpp
+index 40fbb9689..f8bbfba9f 100644
+--- a/src/protocols/SinglePixel.hpp
++++ b/src/protocols/SinglePixel.hpp
+@@ -18,7 +18,6 @@ class CSinglePixelBuffer : public IHLBuffer {
+     virtual Aquamarine::SDMABUFAttrs               dmabuf();
+     virtual std::tuple<uint8_t*, uint32_t, size_t> beginDataPtr(uint32_t flags);
+     virtual void                                   endDataPtr();
+-    virtual SP<CTexture>                           createTexture();
+     //
+     bool good();
+     bool m_success = false;
+diff --git a/src/protocols/core/Compositor.cpp b/src/protocols/core/Compositor.cpp
+index 8ad2a3734..06a4587fc 100644
+--- a/src/protocols/core/Compositor.cpp
++++ b/src/protocols/core/Compositor.cpp
+@@ -91,10 +91,12 @@ CWLSurfaceResource::CWLSurfaceResource(SP<CWlSurface> resource_) : m_resource(re
+ 
+         if (buf && buf->m_buffer) {
+             m_pending.buffer     = CHLBufferReference(buf->m_buffer.lock());
++            m_pending.texture    = buf->m_buffer->m_texture;
+             m_pending.size       = buf->m_buffer->size;
+             m_pending.bufferSize = buf->m_buffer->size;
+         } else {
+-            m_pending.buffer     = {};
++            m_pending.buffer = {};
++            m_pending.texture.reset();
+             m_pending.size       = Vector2D{};
+             m_pending.bufferSize = Vector2D{};
+         }
+@@ -134,23 +136,33 @@ CWLSurfaceResource::CWLSurfaceResource(SP<CWlSurface> resource_) : m_resource(re
+             commitState(m_pending);
+ 
+             // remove any pending states.
+-            while (!m_pendingStates.empty()) {
+-                m_pendingStates.pop();
+-            }
+-
+-            m_pendingWaiting = false;
++            m_stateQueue.clear();
+             m_pending.reset();
+             return;
+         }
+ 
+-        // save state while we wait for buffer to become ready to read
+-        const auto& state = m_pendingStates.emplace(makeUnique<SSurfaceState>(m_pending));
++        // save state while we wait for buffer to become ready
++        auto state = m_stateQueue.enqueue(makeUnique<SSurfaceState>(m_pending));
+         m_pending.reset();
+ 
+-        if (!m_pendingWaiting) {
+-            m_pendingWaiting = true;
+-            scheduleState(state);
++        // fifo and fences first
++        m_events.stateCommit.emit(state);
++
++        if (state->buffer && state->buffer->type() == Aquamarine::BUFFER_TYPE_DMABUF && state->buffer->dmabuf().success && !state->updated.bits.acquire) {
++            state->buffer->m_syncFd = dc<CDMABuffer*>(state->buffer.m_buffer.get())->exportSyncFile();
++            if (state->buffer->m_syncFd.isValid())
++                m_stateQueue.lock(state, LOCK_REASON_FENCE);
+         }
++
++        // now for timer.
++        m_events.stateCommit2.emit(state);
++
++        if (state->rejected) {
++            m_stateQueue.dropState(state);
++            return;
++        }
++
++        scheduleState(state);
+     });
+ 
+     m_resource->setDamage([this](CWlSurface* r, int32_t x, int32_t y, int32_t w, int32_t h) {
+@@ -479,43 +491,25 @@ CBox CWLSurfaceResource::extends() {
+ }
+ 
+ void CWLSurfaceResource::scheduleState(WP<SSurfaceState> state) {
+-    auto whenReadable = [this, surf = m_self, state] {
+-        if (!surf || state.expired() || m_pendingStates.empty())
++    auto whenReadable = [this, surf = m_self](auto state, auto reason) {
++        if (!surf || !state)
+             return;
+ 
+-        while (!m_pendingStates.empty() && m_pendingStates.front() != state) {
+-            commitState(*m_pendingStates.front());
+-            m_pendingStates.pop();
+-        }
+-
+-        commitState(*m_pendingStates.front());
+-        m_pendingStates.pop();
+-
+-        // If more states are queued, schedule next state
+-        if (!m_pendingStates.empty()) {
+-            scheduleState(m_pendingStates.front());
+-        } else {
+-            m_pendingWaiting = false;
+-        }
++        m_stateQueue.unlock(state, reason);
+     };
+ 
+     if (state->updated.bits.acquire) {
+         // wait on acquire point for this surface, from explicit sync protocol
+-        state->acquire.addWaiter(std::move(whenReadable));
++        state->acquire.addWaiter([state, whenReadable]() { whenReadable(state, LOCK_REASON_FENCE); });
+     } else if (state->buffer && state->buffer->isSynchronous()) {
+         // synchronous (shm) buffers can be read immediately
+-        whenReadable();
+-    } else if (state->buffer && state->buffer->type() == Aquamarine::BUFFER_TYPE_DMABUF && state->buffer->dmabuf().success) {
++        m_stateQueue.unlock(state);
++    } else if (state->buffer && state->buffer->m_syncFd.isValid()) {
+         // async buffer and is dmabuf, then we can wait on implicit fences
+-        auto syncFd = dc<CDMABuffer*>(state->buffer.m_buffer.get())->exportSyncFile();
+-
+-        if (syncFd.isValid())
+-            g_pEventLoopManager->doOnReadable(std::move(syncFd), std::move(whenReadable));
+-        else
+-            whenReadable();
++        g_pEventLoopManager->doOnReadable(std::move(state->buffer->m_syncFd), [state, whenReadable]() { whenReadable(state, LOCK_REASON_FENCE); });
+     } else {
+         // state commit without a buffer.
+-        whenReadable();
++        m_stateQueue.unlock(state);
+     }
+ }
+ 
+@@ -526,8 +520,6 @@ void CWLSurfaceResource::commitState(SSurfaceState& state) {
+     if (m_current.buffer) {
+         if (m_current.buffer->isSynchronous())
+             m_current.updateSynchronousTexture(lastTexture);
+-        else if (!m_current.buffer->isSynchronous() && state.updated.bits.buffer) // only get a new texture when a new buffer arrived
+-            m_current.texture = m_current.buffer->createTexture();
+ 
+         // if the surface is a cursor, update the shm buffer
+         // TODO: don't update the entire texture
+@@ -558,6 +550,13 @@ void CWLSurfaceResource::commitState(SSurfaceState& state) {
+             nullptr);
+     }
+ 
++    if (m_current.updated.bits.damage) {
++        // damage is always relative to the current commit
++        m_current.updated.bits.damage = false;
++        m_current.damage.clear();
++        m_current.bufferDamage.clear();
++    }
++
+     // release the buffer if it's synchronous (SHM) as updateSynchronousTexture() has copied the buffer data to a GPU tex
+     // if it doesn't have a role, we can't release it yet, in case it gets turned into a cursor.
+     if (m_current.buffer && m_current.buffer->isSynchronous() && m_role->role() != SURFACE_ROLE_UNASSIGNED)
+@@ -667,7 +666,8 @@ CWLCompositorResource::CWLCompositorResource(SP<CWlCompositor> resource_) : m_re
+             return;
+         }
+ 
+-        RESOURCE->m_self = RESOURCE;
++        RESOURCE->m_self       = RESOURCE;
++        RESOURCE->m_stateQueue = CSurfaceStateQueue(RESOURCE);
+ 
+         LOGM(LOG, "New wl_surface with id {} at {:x}", id, (uintptr_t)RESOURCE.get());
+ 
+diff --git a/src/protocols/core/Compositor.hpp b/src/protocols/core/Compositor.hpp
+index dc61917d4..d6cc92063 100644
+--- a/src/protocols/core/Compositor.hpp
++++ b/src/protocols/core/Compositor.hpp
+@@ -13,6 +13,7 @@
+ #include <cstdint>
+ #include "../WaylandProtocol.hpp"
+ #include "../../render/Texture.hpp"
++#include "protocols/types/SurfaceStateQueue.hpp"
+ #include "wayland.hpp"
+ #include "../../helpers/signal/Signal.hpp"
+ #include "../../helpers/math/Math.hpp"
+@@ -29,6 +30,8 @@ class CWLSurfaceResource;
+ class CWLSubsurfaceResource;
+ class CViewportResource;
+ class CDRMSyncobjSurfaceResource;
++class CFifoResource;
++class CCommitTimerResource;
+ class CColorManagementSurface;
+ class CFrogColorManagementSurface;
+ class CContentType;
+@@ -89,8 +92,10 @@ class CWLSurfaceResource {
+     void                          resetRole();
+ 
+     struct {
+-        CSignalT<>                          precommit; // before commit
+-        CSignalT<>                          commit;    // after commit
++        CSignalT<>                          precommit;    // before commit
++        CSignalT<WP<SSurfaceState>>         stateCommit;  // when placing state in queue
++        CSignalT<WP<SSurfaceState>>         stateCommit2; // when placing state in queue used for commit timing so we apply fifo/fences first.
++        CSignalT<>                          commit;       // after commit
+         CSignalT<>                          map;
+         CSignalT<>                          unmap;
+         CSignalT<SP<CWLSubsurfaceResource>> newSubsurface;
+@@ -101,8 +106,7 @@ class CWLSurfaceResource {
+ 
+     SSurfaceState                          m_current;
+     SSurfaceState                          m_pending;
+-    std::queue<UP<SSurfaceState>>          m_pendingStates;
+-    bool                                   m_pendingWaiting = false;
++    CSurfaceStateQueue                     m_stateQueue;
+ 
+     WP<CWLSurfaceResource>                 m_self;
+     WP<CWLSurface>                         m_hlSurface;
+@@ -110,7 +114,9 @@ class CWLSurfaceResource {
+     bool                                   m_mapped = false;
+     std::vector<WP<CWLSubsurfaceResource>> m_subsurfaces;
+     SP<ISurfaceRole>                       m_role;
+-    WP<CDRMSyncobjSurfaceResource>         m_syncobj; // may not be present
++    WP<CDRMSyncobjSurfaceResource>         m_syncobj;     // may not be present
++    WP<CFifoResource>                      m_fifo;        // may not be present
++    WP<CCommitTimerResource>               m_commitTimer; // may not be present
+     WP<CColorManagementSurface>            m_colorManagement;
+     WP<CContentType>                       m_contentType;
+ 
+diff --git a/src/protocols/core/Shm.cpp b/src/protocols/core/Shm.cpp
+index 30189d8b7..43c087bc2 100644
+--- a/src/protocols/core/Shm.cpp
++++ b/src/protocols/core/Shm.cpp
+@@ -69,10 +69,6 @@ void CWLSHMBuffer::endDataPtr() {
+     ;
+ }
+ 
+-SP<CTexture> CWLSHMBuffer::createTexture() {
+-    return nullptr;
+-}
+-
+ bool CWLSHMBuffer::good() {
+     return true;
+ }
+diff --git a/src/protocols/core/Shm.hpp b/src/protocols/core/Shm.hpp
+index fba3de8da..37210398a 100644
+--- a/src/protocols/core/Shm.hpp
++++ b/src/protocols/core/Shm.hpp
+@@ -43,7 +43,6 @@ class CWLSHMBuffer : public IHLBuffer {
+     virtual Aquamarine::SSHMAttrs                  shm();
+     virtual std::tuple<uint8_t*, uint32_t, size_t> beginDataPtr(uint32_t flags);
+     virtual void                                   endDataPtr();
+-    virtual SP<CTexture>                           createTexture();
+ 
+     bool                                           good();
+ 
+diff --git a/src/protocols/types/Buffer.hpp b/src/protocols/types/Buffer.hpp
+index 1e79ce775..17e31ecf7 100644
+--- a/src/protocols/types/Buffer.hpp
++++ b/src/protocols/types/Buffer.hpp
+@@ -23,14 +23,15 @@ class IHLBuffer : public Aquamarine::IBuffer {
+     virtual void                          lock();
+     virtual void                          unlock();
+     virtual bool                          locked();
+-    virtual SP<CTexture>                  createTexture() = 0;
+ 
+     void                                  onBackendRelease(const std::function<void()>& fn);
+     void                                  addReleasePoint(CDRMSyncPointState& point);
+ 
+     bool                                  m_opaque = false;
++		SP<CTexture>                          m_texture;
+     SP<CWLBufferResource>                 m_resource;
+     std::vector<UP<CSyncReleaser>>        m_syncReleasers;
++		Hyprutils::OS::CFileDescriptor        m_syncFd;
+     UP<CEGLSync>                          m_eglSync;
+ 
+     struct {
+diff --git a/src/protocols/types/DMABuffer.cpp b/src/protocols/types/DMABuffer.cpp
+index ed24baae7..ab8bc86dd 100644
+--- a/src/protocols/types/DMABuffer.cpp
++++ b/src/protocols/types/DMABuffer.cpp
+@@ -13,14 +13,34 @@
+ using namespace Hyprutils::OS;
+ 
+ CDMABuffer::CDMABuffer(uint32_t id, wl_client* client, Aquamarine::SDMABUFAttrs const& attrs_) : m_attrs(attrs_) {
++    g_pHyprRenderer->makeEGLCurrent();
++
+     m_listeners.resourceDestroy = events.destroy.listen([this] {
+         closeFDs();
+         m_listeners.resourceDestroy.reset();
+     });
+ 
+-    size       = m_attrs.size;
+-    m_opaque   = NFormatUtils::isFormatOpaque(m_attrs.format);
+-    m_resource = CWLBufferResource::create(makeShared<CWlBuffer>(client, 1, id));
++    size          = m_attrs.size;
++    m_resource    = CWLBufferResource::create(makeShared<CWlBuffer>(client, 1, id));
++    auto eglImage = g_pHyprOpenGL->createEGLImage(m_attrs);
++
++    if UNLIKELY (!eglImage) {
++        Debug::log(ERR, "CDMABuffer: failed to import EGLImage, retrying as implicit");
++        m_attrs.modifier = DRM_FORMAT_MOD_INVALID;
++        eglImage         = g_pHyprOpenGL->createEGLImage(m_attrs);
++
++        if UNLIKELY (!eglImage) {
++            Debug::log(ERR, "CDMABuffer: failed to import EGLImage");
++            return;
++        }
++    }
++
++    m_texture = makeShared<CTexture>(m_attrs, eglImage); // texture takes ownership of the eglImage
++    m_opaque  = NFormatUtils::isFormatOpaque(m_attrs.format);
++    m_success = m_texture->m_texID;
++
++    if UNLIKELY (!m_success)
++        Debug::log(ERR, "Failed to create a dmabuf: texture is null");
+ }
+ 
+ CDMABuffer::~CDMABuffer() {
+@@ -59,35 +79,8 @@ void CDMABuffer::endDataPtr() {
+     // FIXME:
+ }
+ 
+-SP<CTexture> CDMABuffer::createTexture() {
+-    if (m_texture) // dmabuffers only get one texture per buffer.
+-        return m_texture;
+-
+-    g_pHyprRenderer->makeEGLCurrent();
+-    auto eglImage = g_pHyprOpenGL->createEGLImage(m_attrs);
+-
+-    if UNLIKELY (!eglImage) {
+-        Debug::log(ERR, "CDMABuffer: failed to import EGLImage, retrying as implicit");
+-        m_attrs.modifier = DRM_FORMAT_MOD_INVALID;
+-        eglImage         = g_pHyprOpenGL->createEGLImage(m_attrs);
+-        if UNLIKELY (!eglImage) {
+-            Debug::log(ERR, "CDMABuffer: failed to import EGLImage");
+-            return nullptr;
+-        }
+-    }
+-
+-    m_texture = makeShared<CTexture>(m_attrs, eglImage); // texture takes ownership of the eglImage
+-
+-    if UNLIKELY (!m_texture->m_texID) {
+-        Debug::log(ERR, "Failed to create a dmabuf: texture is null");
+-        return nullptr;
+-    }
+-
+-    return m_texture;
+-}
+-
+ bool CDMABuffer::good() {
+-    return m_attrs.success;
++    return m_success;
+ }
+ 
+ void CDMABuffer::closeFDs() {
+diff --git a/src/protocols/types/DMABuffer.hpp b/src/protocols/types/DMABuffer.hpp
+index 8b8382524..5a0064da5 100644
+--- a/src/protocols/types/DMABuffer.hpp
++++ b/src/protocols/types/DMABuffer.hpp
+@@ -15,14 +15,13 @@ class CDMABuffer : public IHLBuffer {
+     virtual Aquamarine::SDMABUFAttrs               dmabuf();
+     virtual std::tuple<uint8_t*, uint32_t, size_t> beginDataPtr(uint32_t flags);
+     virtual void                                   endDataPtr();
+-    virtual SP<CTexture>                           createTexture();
+     bool                                           good();
+     void                                           closeFDs();
+     Hyprutils::OS::CFileDescriptor                 exportSyncFile();
++    bool                                           m_success = false;
+ 
+   private:
+     Aquamarine::SDMABUFAttrs m_attrs;
+-    SP<CTexture>             m_texture;
+ 
+     struct {
+         CHyprSignalListener resourceDestroy;
+diff --git a/src/protocols/types/SurfaceState.cpp b/src/protocols/types/SurfaceState.cpp
+index 248ce8356..17437fbc4 100644
+--- a/src/protocols/types/SurfaceState.cpp
++++ b/src/protocols/types/SurfaceState.cpp
+@@ -62,16 +62,18 @@ void SSurfaceState::reset() {
+     bufferDamage.clear();
+ 
+     callbacks.clear();
++    lockMask = LOCK_REASON_NONE;
+ }
+ 
+-void SSurfaceState::updateFrom(SSurfaceState& ref) {
+-    updated = ref.updated;
++void SSurfaceState::updateFrom(SSurfaceState& ref, bool merge) {
++    if (merge)
++        updated.all |= ref.updated.all;
++    else
++        updated = ref.updated;
+ 
+     if (ref.updated.bits.buffer) {
+-        if (!ref.buffer.m_buffer)
+-            texture.reset(); // null buffer reset texture.
+-
+         buffer     = ref.buffer;
++        texture    = ref.texture;
+         size       = ref.size;
+         bufferSize = ref.bufferSize;
+     }
+@@ -79,10 +81,6 @@ void SSurfaceState::updateFrom(SSurfaceState& ref) {
+     if (ref.updated.bits.damage) {
+         damage       = ref.damage;
+         bufferDamage = ref.bufferDamage;
+-    } else {
+-        // damage is always relative to the current commit
+-        damage.clear();
+-        bufferDamage.clear();
+     }
+ 
+     if (ref.updated.bits.input)
+diff --git a/src/protocols/types/SurfaceState.hpp b/src/protocols/types/SurfaceState.hpp
+index e6764edaa..d41b3d3bc 100644
+--- a/src/protocols/types/SurfaceState.hpp
++++ b/src/protocols/types/SurfaceState.hpp
+@@ -8,6 +8,31 @@ class CTexture;
+ class CDRMSyncPointState;
+ class CWLCallbackResource;
+ 
++enum eLockReason : uint8_t {
++    LOCK_REASON_NONE  = 0,
++    LOCK_REASON_FENCE = 1 << 0,
++    LOCK_REASON_FIFO  = 1 << 1,
++    LOCK_REASON_TIMER = 1 << 2
++};
++
++inline eLockReason operator|(eLockReason a, eLockReason b) {
++    return sc<eLockReason>(sc<uint8_t>(a) | sc<uint8_t>(b));
++}
++inline eLockReason operator&(eLockReason a, eLockReason b) {
++    return sc<eLockReason>(sc<uint8_t>(a) & sc<uint8_t>(b));
++}
++inline eLockReason& operator|=(eLockReason& a, eLockReason b) {
++    a = a | b;
++    return a;
++}
++inline eLockReason& operator&=(eLockReason& a, eLockReason b) {
++    a = a & b;
++    return a;
++}
++inline eLockReason operator~(eLockReason a) {
++    return sc<eLockReason>(~sc<uint8_t>(a));
++}
++
+ struct SSurfaceState {
+     union {
+         uint16_t all = 0;
+@@ -57,13 +82,14 @@ struct SSurfaceState {
+ 
+     // drm syncobj protocol surface state
+     CDRMSyncPointState acquire;
++    eLockReason        lockMask = LOCK_REASON_NONE;
+ 
+     // texture of surface content, used for rendering
+     SP<CTexture> texture;
+     void         updateSynchronousTexture(SP<CTexture> lastTexture);
+ 
+     // helpers
+-    CRegion accumulateBufferDamage();       // transforms state.damage and merges it into state.bufferDamage
+-    void    updateFrom(SSurfaceState& ref); // updates this state based on a reference state.
+-    void    reset();                        // resets pending state after commit
++    CRegion accumulateBufferDamage();                           // transforms state.damage and merges it into state.bufferDamage
++    void    updateFrom(SSurfaceState& ref, bool merge = false); // updates this state based on a reference state.
++    void    reset();                                            // resets pending state after commit
+ };
+diff --git a/src/protocols/types/SurfaceStateQueue.cpp b/src/protocols/types/SurfaceStateQueue.cpp
+new file mode 100644
+index 000000000..3408d61c2
+--- /dev/null
++++ b/src/protocols/types/SurfaceStateQueue.cpp
+@@ -0,0 +1,90 @@
++#include "SurfaceStateQueue.hpp"
++#include "../core/Compositor.hpp"
++#include "SurfaceState.hpp"
++
++CSurfaceStateQueue::CSurfaceStateQueue(WP<CWLSurfaceResource> surf) : m_surface(std::move(surf)) {}
++
++void CSurfaceStateQueue::clear() {
++    m_queue.clear();
++}
++
++WP<SSurfaceState> CSurfaceStateQueue::enqueue(UP<SSurfaceState>&& state) {
++    return m_queue.emplace_back(std::move(state));
++}
++
++void CSurfaceStateQueue::dropState(const WP<SSurfaceState>& state) {
++    auto it = find(state);
++    if (it == m_queue.end())
++        return;
++
++    m_queue.erase(it);
++}
++
++void CSurfaceStateQueue::lock(const WP<SSurfaceState>& weakState, eLockReason reason) {
++    auto it = find(weakState);
++    if (it == m_queue.end())
++        return;
++
++    it->get()->lockMask |= reason;
++}
++
++void CSurfaceStateQueue::unlock(const WP<SSurfaceState>& state, eLockReason reason) {
++    auto it = find(state);
++    if (it == m_queue.end())
++        return;
++
++    it->get()->lockMask &= ~reason;
++    tryProcess();
++}
++
++void CSurfaceStateQueue::unlockFirst(eLockReason reason) {
++    for (auto& it : m_queue) {
++        if ((it->lockMask & reason) != LOCK_REASON_NONE) {
++            it->lockMask &= ~reason;
++            break;
++        }
++    }
++
++    tryProcess();
++}
++
++auto CSurfaceStateQueue::find(const WP<SSurfaceState>& state) -> std::deque<UP<SSurfaceState>>::iterator {
++    if (state.expired())
++        return m_queue.end();
++
++    auto* raw = state.get(); // get raw pointer
++
++    for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
++        if (it->get() == raw)
++            return it;
++    }
++
++    return m_queue.end();
++}
++
++void CSurfaceStateQueue::tryProcess() {
++    if (m_queue.empty())
++        return;
++
++    auto front = m_queue.begin();
++    if (front->get()->lockMask != LOCK_REASON_NONE)
++        return;
++
++    auto next = std::next(front);
++    if (next == m_queue.end()) {
++        m_surface->commitState(**front);
++        m_queue.pop_front();
++        return;
++    }
++
++    while (!m_queue.empty() && next != m_queue.end() && next->get()->lockMask == LOCK_REASON_NONE && !next->get()->updated.bits.buffer) {
++        next->get()->updateFrom(**front, true);
++        m_queue.pop_front();
++
++        front = m_queue.begin();
++        next  = std::next(front);
++    }
++
++    m_surface->commitState(**front);
++    m_queue.pop_front();
++}
+diff --git a/src/protocols/types/SurfaceStateQueue.hpp b/src/protocols/types/SurfaceStateQueue.hpp
+new file mode 100644
+index 000000000..02ccc75ae
+--- /dev/null
++++ b/src/protocols/types/SurfaceStateQueue.hpp
+@@ -0,0 +1,27 @@
++#pragma once
++
++#include "helpers/memory/Memory.hpp"
++#include "SurfaceState.hpp"
++#include <deque>
++
++class CWLSurfaceResource;
++
++class CSurfaceStateQueue {
++  public:
++    CSurfaceStateQueue() = default;
++    explicit CSurfaceStateQueue(WP<CWLSurfaceResource> surf);
++
++    void              clear();
++    WP<SSurfaceState> enqueue(UP<SSurfaceState>&& state);
++    void              dropState(const WP<SSurfaceState>& state);
++    void              lock(const WP<SSurfaceState>& state, eLockReason reason);
++    void              unlock(const WP<SSurfaceState>& state, eLockReason reason = LOCK_REASON_NONE);
++    void              unlockFirst(eLockReason reason);
++    void              tryProcess();
++
++  private:
++    std::deque<UP<SSurfaceState>>                    m_queue;
++    WP<CWLSurfaceResource>                           m_surface;
++
++    typename std::deque<UP<SSurfaceState>>::iterator find(const WP<SSurfaceState>& state);
++};

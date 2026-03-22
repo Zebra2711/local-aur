@@ -1,0 +1,725 @@
+diff --git a/src/helpers/Drm.cpp b/src/helpers/Drm.cpp
+index 207b5e3d4db..76a3377c89d 100644
+--- a/src/helpers/Drm.cpp
++++ b/src/helpers/Drm.cpp
+@@ -1,6 +1,16 @@
+ #include <xf86drm.h>
++
++#ifdef __linux__
++#include <linux/dma-buf.h>
++#include <linux/sync_file.h>
++#endif
++
++#include <libsync.h>
++#include <sys/ioctl.h>
+ #include "Drm.hpp"
+ 
++using namespace Hyprutils::OS;
++
+ bool DRM::sameGpu(int fd1, int fd2) {
+     drmDevice* devA = nullptr;
+     drmDevice* devB = nullptr;
+@@ -18,3 +28,62 @@ bool DRM::sameGpu(int fd1, int fd2) {
+     drmFreeDevice(&devB);
+     return same;
+ }
++
++int DRM::doIoctl(int fd, unsigned long request, void* arg) {
++    int ret;
++
++    do {
++        ret = ioctl(fd, request, arg);
++    } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
++    return ret;
++}
++
++// https://www.kernel.org/doc/html/latest/driver-api/dma-buf.html#c.dma_buf_export_sync_file
++// returns a sync file that will be signalled when dmabuf is ready to be read
++CFileDescriptor DRM::exportFence(int fd) {
++#ifndef __linux__
++    return {};
++#endif
++
++#ifdef DMA_BUF_IOCTL_EXPORT_SYNC_FILE
++    if (fd < 0)
++        return {};
++
++    dma_buf_export_sync_file request{
++        .flags = DMA_BUF_SYNC_READ,
++        .fd    = -1,
++    };
++
++    if (doIoctl(fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &request) == 0)
++        return CFileDescriptor{request.fd};
++#endif
++    return {};
++}
++
++CFileDescriptor DRM::mergeFence(int fence1, int fence2) {
++#ifndef __linux__
++    return {};
++#else
++    sync_accumulate("merged release fence", &fence1, fence2);
++
++    if (fence2 >= 0)
++        close(fence2);
++
++    return CFileDescriptor{fence1};
++
++#endif
++}
++
++void DRM::setDeadline(const Time::steady_tp& deadline, const Hyprutils::OS::CFileDescriptor& fence) {
++#ifdef SYNC_IOC_SET_DEADLINE
++    if (!fence.isValid())
++        return;
++
++    sync_set_deadline args{
++        .deadline_ns = uint64_t(deadline.time_since_epoch().count()),
++        .pad         = 0,
++    };
++
++    doIoctl(fence.get(), SYNC_IOC_SET_DEADLINE, &args);
++#endif
++}
+diff --git a/src/helpers/Drm.hpp b/src/helpers/Drm.hpp
+index bc56b1eecc9..78c8a626ef6 100644
+--- a/src/helpers/Drm.hpp
++++ b/src/helpers/Drm.hpp
+@@ -1,5 +1,11 @@
+ #pragma once
++#include "time/Time.hpp"
++#include <hyprutils/os/FileDescriptor.hpp>
+ 
+ namespace DRM {
+-    bool sameGpu(int fd1, int fd2);
++    bool                           sameGpu(int fd1, int fd2);
++    int                            doIoctl(int fd, unsigned long request, void* arg);
++    Hyprutils::OS::CFileDescriptor exportFence(int fd);
++    Hyprutils::OS::CFileDescriptor mergeFence(int fence1, int fence2);
++    void                           setDeadline(const Time::steady_tp& deadline, const Hyprutils::OS::CFileDescriptor& fence);
+ }
+diff --git a/src/helpers/Monitor.cpp b/src/helpers/Monitor.cpp
+index f287bff3740..675e45906d6 100644
+--- a/src/helpers/Monitor.cpp
++++ b/src/helpers/Monitor.cpp
+@@ -148,6 +148,9 @@ void CMonitor::onConnect(bool noRule) {
+             });
+         }
+ 
++        auto minVBlankInterval = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / m_refreshRate));
++        m_estimatedNextVblank  = (ts ? Time::fromTimespec(ts) : Time::steadyNow()) + minVBlankInterval;
++
+         m_frameScheduler->onPresented();
+ 
+         m_events.presented.emit();
+diff --git a/src/helpers/Monitor.hpp b/src/helpers/Monitor.hpp
+index 72e0cf66d7b..69626dfafcc 100644
+--- a/src/helpers/Monitor.hpp
++++ b/src/helpers/Monitor.hpp
+@@ -96,68 +96,69 @@ class CMonitor {
+     CMonitor(SP<Aquamarine::IOutput> output);
+     ~CMonitor();
+ 
+-    Vector2D                    m_position         = Vector2D(-1, -1); // means unset
+-    Vector2D                    m_xwaylandPosition = Vector2D(-1, -1); // means unset
+-    eAutoDirs                   m_autoDir          = DIR_AUTO_NONE;
+-    Vector2D                    m_size             = Vector2D(0, 0);
+-    Vector2D                    m_pixelSize        = Vector2D(0, 0);
+-    Vector2D                    m_transformedSize  = Vector2D(0, 0);
+-
+-    MONITORID                   m_id                     = MONITOR_INVALID;
+-    PHLWORKSPACE                m_activeWorkspace        = nullptr;
+-    PHLWORKSPACE                m_activeSpecialWorkspace = nullptr;
+-    float                       m_setScale               = 1; // scale set by cfg
+-    float                       m_scale                  = 1; // real scale
+-
+-    std::string                 m_name             = "";
+-    std::string                 m_description      = "";
+-    std::string                 m_shortDescription = "";
+-
+-    drmModeModeInfo             m_customDrmMode = {};
+-
+-    Desktop::CReservedArea      m_reservedArea;
+-
+-    CMonitorState               m_state;
+-    CDamageRing                 m_damage;
+-
+-    SP<Aquamarine::IOutput>     m_output;
+-    float                       m_refreshRate     = 60; // Hz
+-    int                         m_forceFullFrames = 0;
+-    bool                        m_scheduledRecalc = false;
+-    wl_output_transform         m_transform       = WL_OUTPUT_TRANSFORM_NORMAL;
+-    float                       m_xwaylandScale   = 1.f;
+-    Mat3x3                      m_projMatrix;
+-    std::optional<Vector2D>     m_forceSize;
+-    SP<Aquamarine::SOutputMode> m_currentMode;
+-    SP<Aquamarine::CSwapchain>  m_cursorSwapchain;
+-    uint32_t                    m_drmFormat     = DRM_FORMAT_INVALID;
+-    uint32_t                    m_prevDrmFormat = DRM_FORMAT_INVALID;
+-
+-    CMonitorZoomController      m_zoomController;
+-
+-    bool                        m_dpmsStatus       = true;
+-    bool                        m_vrrActive        = false; // this can be TRUE even if VRR is not active in the case that this display does not support it.
+-    bool                        m_enabled10bit     = false; // as above, this can be TRUE even if 10 bit failed.
+-    NCMType::eCMType            m_cmType           = NCMType::CM_SRGB;
+-    NTransferFunction::eTF      m_sdrEotf          = NTransferFunction::TF_DEFAULT;
+-    float                       m_sdrSaturation    = 1.0f;
+-    float                       m_sdrBrightness    = 1.0f;
+-    float                       m_sdrMinLuminance  = 0.2f;
+-    int                         m_sdrMaxLuminance  = 80;
+-    bool                        m_createdByUser    = false;
+-    bool                        m_isUnsafeFallback = false;
+-
+-    SP<CEventLoopTimer>         m_dpmsRetryTimer;
+-
+-    bool                        m_pendingFrame    = false; // if we schedule a frame during rendering, reschedule it after
+-    bool                        m_renderingActive = false;
+-
+-    bool                        m_ratsScheduled = false;
+-    CTimer                      m_lastPresentationTimer;
+-
+-    bool                        m_isBeingLeased = false;
+-
+-    SMonitorRule                m_activeMonitorRule;
++    Vector2D                       m_position         = Vector2D(-1, -1); // means unset
++    Vector2D                       m_xwaylandPosition = Vector2D(-1, -1); // means unset
++    eAutoDirs                      m_autoDir          = DIR_AUTO_NONE;
++    Vector2D                       m_size             = Vector2D(0, 0);
++    Vector2D                       m_pixelSize        = Vector2D(0, 0);
++    Vector2D                       m_transformedSize  = Vector2D(0, 0);
++
++    MONITORID                      m_id                     = MONITOR_INVALID;
++    PHLWORKSPACE                   m_activeWorkspace        = nullptr;
++    PHLWORKSPACE                   m_activeSpecialWorkspace = nullptr;
++    float                          m_setScale               = 1; // scale set by cfg
++    float                          m_scale                  = 1; // real scale
++
++    std::string                    m_name             = "";
++    std::string                    m_description      = "";
++    std::string                    m_shortDescription = "";
++
++    drmModeModeInfo                m_customDrmMode = {};
++
++    Desktop::CReservedArea         m_reservedArea;
++
++    CMonitorState                  m_state;
++    CDamageRing                    m_damage;
++
++    SP<Aquamarine::IOutput>        m_output;
++    float                          m_refreshRate     = 60; // Hz
++    int                            m_forceFullFrames = 0;
++    bool                           m_scheduledRecalc = false;
++    wl_output_transform            m_transform       = WL_OUTPUT_TRANSFORM_NORMAL;
++    float                          m_xwaylandScale   = 1.f;
++    Mat3x3                         m_projMatrix;
++    std::optional<Vector2D>        m_forceSize;
++    SP<Aquamarine::SOutputMode>    m_currentMode;
++    SP<Aquamarine::CSwapchain>     m_cursorSwapchain;
++    uint32_t                       m_drmFormat     = DRM_FORMAT_INVALID;
++    uint32_t                       m_prevDrmFormat = DRM_FORMAT_INVALID;
++
++    CMonitorZoomController         m_zoomController;
++
++    bool                           m_dpmsStatus       = true;
++    bool                           m_vrrActive        = false; // this can be TRUE even if VRR is not active in the case that this display does not support it.
++    bool                           m_enabled10bit     = false; // as above, this can be TRUE even if 10 bit failed.
++    NCMType::eCMType               m_cmType           = NCMType::CM_SRGB;
++    NTransferFunction::eTF         m_sdrEotf          = NTransferFunction::TF_DEFAULT;
++    float                          m_sdrSaturation    = 1.0f;
++    float                          m_sdrBrightness    = 1.0f;
++    float                          m_sdrMinLuminance  = 0.2f;
++    int                            m_sdrMaxLuminance  = 80;
++    bool                           m_createdByUser    = false;
++    bool                           m_isUnsafeFallback = false;
++
++    SP<CEventLoopTimer>            m_dpmsRetryTimer;
++
++    bool                           m_pendingFrame    = false; // if we schedule a frame during rendering, reschedule it after
++    bool                           m_renderingActive = false;
++
++    bool                           m_ratsScheduled = false;
++    CTimer                         m_lastPresentationTimer;
++    std::optional<Time::steady_tp> m_estimatedNextVblank;
++
++    bool                           m_isBeingLeased = false;
++
++    SMonitorRule                   m_activeMonitorRule;
+ 
+     // explicit sync
+     Hyprutils::OS::CFileDescriptor m_inFence; // TODO: remove when aq uses CFileDescriptor
+diff --git a/src/helpers/sync/SyncReleaser.cpp b/src/helpers/sync/SyncReleaser.cpp
+index fbc585d0b81..a8112741a3e 100644
+--- a/src/helpers/sync/SyncReleaser.cpp
++++ b/src/helpers/sync/SyncReleaser.cpp
+@@ -1,21 +1,7 @@
+ #include "SyncReleaser.hpp"
+ #include "SyncTimeline.hpp"
+ #include "../../render/OpenGL.hpp"
+-#include <sys/ioctl.h>
+-
+-#if defined(__linux__)
+-#include <linux/sync_file.h>
+-#else
+-struct sync_merge_data {
+-    char  name[32];
+-    __s32 fd2;
+-    __s32 fence;
+-    __u32 flags;
+-    __u32 pad;
+-};
+-#define SYNC_IOC_MAGIC '>'
+-#define SYNC_IOC_MERGE _IOWR(SYNC_IOC_MAGIC, 3, struct sync_merge_data)
+-#endif
++#include "../../helpers/Drm.hpp"
+ 
+ using namespace Hyprutils::OS;
+ 
+@@ -35,30 +21,11 @@ CSyncReleaser::~CSyncReleaser() {
+         m_timeline->signal(m_point);
+ }
+ 
+-static CFileDescriptor mergeSyncFds(const CFileDescriptor& fd1, const CFileDescriptor& fd2) {
+-    // combines the fences of both sync_fds into a dma_fence_array (https://www.kernel.org/doc/html/latest/driver-api/dma-buf.html#c.dma_fence_array_create)
+-    // with the signal_on_any param set to false, so the new sync_fd will "signal when all fences in the array signal."
+-
+-    struct sync_merge_data data{
+-        .name  = "merged release fence",
+-        .fd2   = fd2.get(),
+-        .fence = -1,
+-    };
+-    int err = -1;
+-    do {
+-        err = ioctl(fd1.get(), SYNC_IOC_MERGE, &data);
+-    } while (err == -1 && (errno == EINTR || errno == EAGAIN));
+-    if (err < 0)
+-        return CFileDescriptor{};
+-    else
+-        return CFileDescriptor(data.fence);
+-}
+-
+ void CSyncReleaser::addSyncFileFd(const Hyprutils::OS::CFileDescriptor& syncFd) {
+-    if (m_fd.isValid())
+-        m_fd = mergeSyncFds(m_fd, syncFd);
+-    else
++    if (!m_fd.isValid())
+         m_fd = syncFd.duplicate();
++    else
++        m_fd = DRM::mergeFence(m_fd.take(), syncFd.duplicate().take());
+ }
+ 
+ void CSyncReleaser::drop() {
+diff --git a/src/protocols/core/Compositor.cpp b/src/protocols/core/Compositor.cpp
+index 06f430b91e3..7211c5407c8 100644
+--- a/src/protocols/core/Compositor.cpp
++++ b/src/protocols/core/Compositor.cpp
+@@ -8,6 +8,7 @@
+ #include "Subcompositor.hpp"
+ #include "../Viewporter.hpp"
+ #include "../../helpers/Monitor.hpp"
++#include "../../helpers/Drm.hpp"
+ #include "../PresentationTime.hpp"
+ #include "../DRMSyncobj.hpp"
+ #include "../types/DMABuffer.hpp"
+@@ -148,10 +149,50 @@ CWLSurfaceResource::CWLSurfaceResource(SP<CWlSurface> resource_) : m_resource(re
+         // fifo and fences first
+         m_events.stateCommit.emit(state);
+ 
+-        if (state->buffer && state->buffer->type() == Aquamarine::BUFFER_TYPE_DMABUF && state->buffer->dmabuf().success && !state->updated.bits.acquire) {
+-            state->buffer->m_syncFd = dc<CDMABuffer*>(state->buffer.m_buffer.get())->exportSyncFile();
+-            if (state->buffer->m_syncFd.isValid())
+-                m_stateQueue.lock(state, LOCK_REASON_FENCE);
++        if (state->buffer && state->buffer->type() == Aquamarine::BUFFER_TYPE_DMABUF && state->buffer->dmabuf().success) {
++            Time::steady_tp deadline = Time::steadyNow();
++            if (g_pHyprOpenGL->explicitSyncSupported()) {
++                if (m_enteredOutputs.empty() && m_hlSurface) {
++                    for (const auto& m : g_pCompositor->m_monitors) {
++                        if (!m || !m->m_enabled)
++                            continue;
++
++                        auto box = m_hlSurface->getSurfaceBoxGlobal();
++                        if (box && !box->intersection({m->m_position, m->m_size}).empty()) {
++                            if (m->m_tearingState.activelyTearing || m->m_vrrActive || !m->m_estimatedNextVblank || !m->m_estimatedNextVblank.has_value())
++                                continue; // dont estimate vblank on tearing or vrr.
++
++                            deadline = m->m_estimatedNextVblank.value();
++                            break;
++                        }
++                    }
++                } else {
++                    for (const auto& m : m_enteredOutputs) {
++                        if (!m)
++                            continue;
++
++                        if (m->m_tearingState.activelyTearing || m->m_vrrActive || !m->m_estimatedNextVblank || !m->m_estimatedNextVblank.has_value())
++                            continue; // dont estimate vblank on tearing or vrr
++
++                        deadline = m->m_estimatedNextVblank.value();
++                        break;
++                    }
++                }
++
++                if (state->updated.bits.acquire) {
++                    DRM::setDeadline(deadline, state->acquire.exportAsFD());
++                } else {
++                    state->buffer->m_syncFds = dc<CDMABuffer*>(state->buffer.m_buffer.get())->exportSyncFiles();
++                    if (!state->buffer->m_syncFds.empty()) {
++                        for (auto& fence : state->buffer->m_syncFds) {
++                            if (fence.isValid())
++                                DRM::setDeadline(deadline, fence);
++                        }
++
++                        m_stateQueue.lock(state, LOCK_REASON_FENCE);
++                    }
++                }
++            }
+         }
+ 
+         // now for timer.
+@@ -515,9 +556,29 @@ void CWLSurfaceResource::scheduleState(WP<SSurfaceState> state) {
+     } else if (state->buffer && state->buffer->isSynchronous()) {
+         // synchronous (shm) buffers can be read immediately
+         m_stateQueue.unlock(state, LOCK_REASON_FENCE);
+-    } else if (state->buffer && state->buffer->m_syncFd.isValid()) {
++    } else if (state->buffer && !state->buffer->m_syncFds.empty()) {
+         // async buffer and is dmabuf, then we can wait on implicit fences
+-        g_pEventLoopManager->doOnReadable(std::move(state->buffer->m_syncFd), [state, whenReadable]() { whenReadable(state, LOCK_REASON_FENCE); });
++        auto fence = std::ranges::find_if(state->buffer->m_syncFds, [](auto& f) { return !Hyprutils::OS::CFileDescriptor::isReadable(f.get()); });
++        if (fence == state->buffer->m_syncFds.end())
++            m_stateQueue.unlock(state, LOCK_REASON_FENCE);
++        else {
++            auto checkFences = [state, whenReadable](auto&& self) -> void {
++                if (!state || !state->buffer.m_buffer)
++                    return;
++
++                auto fence = std::ranges::find_if(state->buffer->m_syncFds, [](auto& f) { return !Hyprutils::OS::CFileDescriptor::isReadable(f.get()); });
++
++                if (fence == state->buffer->m_syncFds.end()) {
++                    // All fences readable
++                    whenReadable(state, LOCK_REASON_FENCE);
++                    return;
++                }
++
++                g_pEventLoopManager->doOnReadable(fence->duplicate(), [state, whenReadable, self]() mutable { self(self); });
++            };
++
++            checkFences(checkFences);
++        }
+     } else {
+         // state commit without a buffer.
+         m_stateQueue.tryProcess();
+diff --git a/src/protocols/types/Buffer.hpp b/src/protocols/types/Buffer.hpp
+index bda44ebc1fd..6b4f54afcd4 100644
+--- a/src/protocols/types/Buffer.hpp
++++ b/src/protocols/types/Buffer.hpp
+@@ -13,24 +13,24 @@ class CHLBufferReference;
+ class IHLBuffer : public Aquamarine::IBuffer {
+   public:
+     virtual ~IHLBuffer();
+-    virtual Aquamarine::eBufferCapability caps()                        = 0;
+-    virtual Aquamarine::eBufferType       type()                        = 0;
+-    virtual void                          update(const CRegion& damage) = 0;
+-    virtual bool                          isSynchronous()               = 0; // whether the updates to this buffer are synchronous, aka happen over cpu
+-    virtual bool                          good()                        = 0;
+-    virtual void                          sendRelease();
+-    virtual void                          lock();
+-    virtual void                          unlock();
+-    virtual bool                          locked();
++    virtual Aquamarine::eBufferCapability       caps()                        = 0;
++    virtual Aquamarine::eBufferType             type()                        = 0;
++    virtual void                                update(const CRegion& damage) = 0;
++    virtual bool                                isSynchronous()               = 0; // whether the updates to this buffer are synchronous, aka happen over cpu
++    virtual bool                                good()                        = 0;
++    virtual void                                sendRelease();
++    virtual void                                lock();
++    virtual void                                unlock();
++    virtual bool                                locked();
+ 
+-    void                                  onBackendRelease(const std::function<void()>& fn);
+-    void                                  addReleasePoint(CDRMSyncPointState& point);
++    void                                        onBackendRelease(const std::function<void()>& fn);
++    void                                        addReleasePoint(CDRMSyncPointState& point);
+ 
+-    SP<CTexture>                          m_texture;
+-    bool                                  m_opaque = false;
+-    SP<CWLBufferResource>                 m_resource;
+-    std::vector<UP<CSyncReleaser>>        m_syncReleasers;
+-    Hyprutils::OS::CFileDescriptor        m_syncFd;
++    SP<CTexture>                                m_texture;
++    bool                                        m_opaque = false;
++    SP<CWLBufferResource>                       m_resource;
++    std::vector<UP<CSyncReleaser>>              m_syncReleasers;
++    std::vector<Hyprutils::OS::CFileDescriptor> m_syncFds;
+ 
+     struct {
+         CHyprSignalListener backendRelease;
+diff --git a/src/protocols/types/DMABuffer.cpp b/src/protocols/types/DMABuffer.cpp
+index f3c3e06772c..350ece3ae13 100644
+--- a/src/protocols/types/DMABuffer.cpp
++++ b/src/protocols/types/DMABuffer.cpp
+@@ -3,12 +3,7 @@
+ #include "../../desktop/view/LayerSurface.hpp"
+ #include "../../render/Renderer.hpp"
+ #include "../../helpers/Format.hpp"
+-
+-#if defined(__linux__)
+-#include <linux/dma-buf.h>
+-#include <linux/sync_file.h>
+-#endif
+-#include <sys/ioctl.h>
++#include "../../helpers/Drm.hpp"
+ 
+ using namespace Hyprutils::OS;
+ 
+@@ -93,18 +88,7 @@ void CDMABuffer::closeFDs() {
+     m_attrs.planes = 0;
+ }
+ 
+-static int doIoctl(int fd, unsigned long request, void* arg) {
+-    int ret;
+-
+-    do {
+-        ret = ioctl(fd, request, arg);
+-    } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+-    return ret;
+-}
+-
+-// https://www.kernel.org/doc/html/latest/driver-api/dma-buf.html#c.dma_buf_export_sync_file
+-// returns a sync file that will be signalled when dmabuf is ready to be read
+-CFileDescriptor CDMABuffer::exportSyncFile() {
++std::vector<CFileDescriptor> CDMABuffer::exportSyncFiles() {
+     if (!good())
+         return {};
+ 
+@@ -114,7 +98,8 @@ CFileDescriptor CDMABuffer::exportSyncFile() {
+     std::vector<CFileDescriptor> syncFds;
+     syncFds.reserve(m_attrs.fds.size());
+ 
+-    for (const auto& fd : m_attrs.fds) {
++    for (auto i = 0ul; i < m_attrs.fds.size(); i++) {
++        auto fd = m_attrs.fds[i];
+         if (fd == -1)
+             continue;
+ 
+@@ -125,40 +110,11 @@ CFileDescriptor CDMABuffer::exportSyncFile() {
+                 continue;
+         }
+ 
+-        dma_buf_export_sync_file request{
+-            .flags = DMA_BUF_SYNC_READ,
+-            .fd    = -1,
+-        };
+-
+-        if (doIoctl(fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &request) == 0)
+-            syncFds.emplace_back(request.fd);
+-    }
+-
+-    if (syncFds.empty())
+-        return {};
+-
+-    CFileDescriptor syncFd;
+-    for (auto& fd : syncFds) {
+-        if (!syncFd.isValid()) {
+-            syncFd = std::move(fd);
+-            continue;
+-        }
+-
+-        const std::string      name = "merged release fence";
+-        struct sync_merge_data data{
+-            .name  = {}, // zero-initialize name[]
+-            .fd2   = fd.get(),
+-            .fence = -1,
+-        };
+-
+-        std::ranges::copy_n(name.c_str(), std::min(name.size() + 1, sizeof(data.name)), data.name);
+-
+-        if (doIoctl(syncFd.get(), SYNC_IOC_MERGE, &data) == 0)
+-            syncFd = CFileDescriptor(data.fence);
+-        else
+-            syncFd = {};
++        auto fence = DRM::exportFence(fd);
++        if (fence.isValid())
++            syncFds.emplace_back(std::move(fence));
+     }
+ 
+-    return syncFd;
++    return syncFds;
+ #endif
+ }
+diff --git a/src/protocols/types/DMABuffer.hpp b/src/protocols/types/DMABuffer.hpp
+index 5a0064da584..cba157ab1ff 100644
+--- a/src/protocols/types/DMABuffer.hpp
++++ b/src/protocols/types/DMABuffer.hpp
+@@ -17,7 +17,7 @@ class CDMABuffer : public IHLBuffer {
+     virtual void                                   endDataPtr();
+     bool                                           good();
+     void                                           closeFDs();
+-    Hyprutils::OS::CFileDescriptor                 exportSyncFile();
++    std::vector<Hyprutils::OS::CFileDescriptor>    exportSyncFiles();
+     bool                                           m_success = false;
+ 
+   private:
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index fbc34910b95..582abc4b05f 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -23,6 +23,7 @@
+ #include "../protocols/DRMSyncobj.hpp"
+ #include "../protocols/LinuxDMABUF.hpp"
+ #include "../helpers/sync/SyncTimeline.hpp"
++#include "../helpers/Drm.hpp"
+ #include "../hyprerror/HyprError.hpp"
+ #include "../debug/HyprDebugOverlay.hpp"
+ #include "../debug/HyprNotificationOverlay.hpp"
+@@ -1532,30 +1533,30 @@ static hdr_output_metadata       createHDRMetadata(SImageDescription settings, S
+ 
+     auto       colorimetry = settings.getPrimaries();
+     auto       luminances  = settings.masteringLuminances.max > 0 ? settings.masteringLuminances :
+-                                                                          (settings.luminances != SImageDescription::SPCLuminances{} ?
+-                                                                               SImageDescription::SPCMasteringLuminances{.min = settings.luminances.min, .max = settings.luminances.max} :
+-                                                                               SImageDescription::SPCMasteringLuminances{.min = monitor->minLuminance(), .max = monitor->maxLuminance(10000)});
++                                                                    (settings.luminances != SImageDescription::SPCLuminances{} ?
++                                                                         SImageDescription::SPCMasteringLuminances{.min = settings.luminances.min, .max = settings.luminances.max} :
++                                                                         SImageDescription::SPCMasteringLuminances{.min = monitor->minLuminance(), .max = monitor->maxLuminance(10000)});
+ 
+     Log::logger->log(Log::TRACE, "ColorManagement primaries {},{} {},{} {},{} {},{}", colorimetry.red.x, colorimetry.red.y, colorimetry.green.x, colorimetry.green.y,
+-                           colorimetry.blue.x, colorimetry.blue.y, colorimetry.white.x, colorimetry.white.y);
++                     colorimetry.blue.x, colorimetry.blue.y, colorimetry.white.x, colorimetry.white.y);
+     Log::logger->log(Log::TRACE, "ColorManagement min {}, max {}, cll {}, fall {}", luminances.min, luminances.max, settings.maxCLL, settings.maxFALL);
+     return hdr_output_metadata{
+-              .metadata_type = 0,
+-              .hdmi_metadata_type1 =
++        .metadata_type = 0,
++        .hdmi_metadata_type1 =
+             hdr_metadata_infoframe{
+-                      .eotf          = eotf,
+-                      .metadata_type = 0,
+-                      .display_primaries =
+-                          {
++                .eotf          = eotf,
++                .metadata_type = 0,
++                .display_primaries =
++                    {
+                         {.x = to16Bit(colorimetry.red.x), .y = to16Bit(colorimetry.red.y)},
+                         {.x = to16Bit(colorimetry.green.x), .y = to16Bit(colorimetry.green.y)},
+                         {.x = to16Bit(colorimetry.blue.x), .y = to16Bit(colorimetry.blue.y)},
+                     },
+-                      .white_point                     = {.x = to16Bit(colorimetry.white.x), .y = to16Bit(colorimetry.white.y)},
+-                      .max_display_mastering_luminance = toNits(luminances.max),
+-                      .min_display_mastering_luminance = toNits(luminances.min * 10000),
+-                      .max_cll                         = toNits(settings.maxCLL > 0 ? settings.maxCLL : monitor->maxCLL()),
+-                      .max_fall                        = toNits(settings.maxFALL > 0 ? settings.maxFALL : monitor->maxFALL()),
++                .white_point                     = {.x = to16Bit(colorimetry.white.x), .y = to16Bit(colorimetry.white.y)},
++                .max_display_mastering_luminance = toNits(luminances.max),
++                .min_display_mastering_luminance = toNits(luminances.min * 10000),
++                .max_cll                         = toNits(settings.maxCLL > 0 ? settings.maxCLL : monitor->maxCLL()),
++                .max_fall                        = toNits(settings.maxFALL > 0 ? settings.maxFALL : monitor->maxFALL()),
+             },
+     };
+ }
+@@ -1680,6 +1681,13 @@ bool CHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor) {
+ 
+     pMonitor->m_previousFSWindow = FS_WINDOW;
+ 
++    auto deadline =
++        pMonitor->m_vrrActive || pMonitor->m_tearingState.activelyTearing || !pMonitor->m_estimatedNextVblank.has_value() ? Time::steadyNow() : pMonitor->m_estimatedNextVblank;
++    if (deadline) {
++        DRM::setDeadline(deadline.value(), m_currentBuffer.fence);
++        pMonitor->m_estimatedNextVblank = std::nullopt;
++    }
++
+     bool ok = pMonitor->m_state.commit();
+     if (!ok) {
+         if (pMonitor->m_inFence.isValid()) {
+@@ -2294,16 +2302,16 @@ bool CHyprRenderer::beginRender(PHLMONITOR pMonitor, CRegion& damage, eRenderMod
+     int bufferAge = 0;
+ 
+     if (!buffer) {
+-        m_currentBuffer = pMonitor->m_output->swapchain->next(&bufferAge);
+-        if (!m_currentBuffer) {
++        m_currentBuffer.buffer = pMonitor->m_output->swapchain->next(&bufferAge);
++        if (!m_currentBuffer.buffer) {
+             Log::logger->log(Log::ERR, "Failed to acquire swapchain buffer for {}", pMonitor->m_name);
+             return false;
+         }
+     } else
+-        m_currentBuffer = buffer;
++        m_currentBuffer.buffer = buffer;
+ 
+     try {
+-        m_currentRenderbuffer = getOrCreateRenderbuffer(m_currentBuffer, pMonitor->m_output->state->state().drmFormat);
++        m_currentRenderbuffer = getOrCreateRenderbuffer(m_currentBuffer.buffer, pMonitor->m_output->state->state().drmFormat);
+     } catch (std::exception& e) {
+         Log::logger->log(Log::ERR, "getOrCreateRenderbuffer failed for {}", pMonitor->m_name);
+         return false;
+@@ -2319,6 +2327,8 @@ bool CHyprRenderer::beginRender(PHLMONITOR pMonitor, CRegion& damage, eRenderMod
+         pMonitor->m_damage.rotate();
+     }
+ 
++    m_currentBuffer.fence = DRM::exportFence(m_currentBuffer.buffer->dmabuf().fds[0]);
++
+     m_currentRenderbuffer->bind();
+     if (simple)
+         g_pHyprOpenGL->beginSimple(pMonitor, damage, m_currentRenderbuffer);
+@@ -2338,7 +2348,7 @@ void CHyprRenderer::endRender(const std::function<void()>& renderingDoneCallback
+         if (m_currentRenderbuffer)
+             m_currentRenderbuffer->unbind();
+         m_currentRenderbuffer = nullptr;
+-        m_currentBuffer       = nullptr;
++        m_currentBuffer       = {};
+     });
+ 
+     if (m_renderMode != RENDER_MODE_TO_BUFFER_READ_ONLY)
+@@ -2353,7 +2363,7 @@ void CHyprRenderer::endRender(const std::function<void()>& renderingDoneCallback
+         return;
+ 
+     if (m_renderMode == RENDER_MODE_NORMAL)
+-        PMONITOR->m_output->state->setBuffer(m_currentBuffer);
++        PMONITOR->m_output->state->setBuffer(m_currentBuffer.buffer);
+ 
+     if (!g_pHyprOpenGL->explicitSyncSupported()) {
+         Log::logger->log(Log::TRACE, "renderer: Explicit sync unsupported, falling back to implicit in endRender");
+diff --git a/src/render/Renderer.hpp b/src/render/Renderer.hpp
+index 24e0fb66137..4d663e32675 100644
+--- a/src/render/Renderer.hpp
++++ b/src/render/Renderer.hpp
+@@ -122,6 +122,11 @@ class CHyprRenderer {
+     CRenderPass m_renderPass = {};
+ 
+   private:
++    struct SBuffer {
++        SP<Aquamarine::IBuffer>        buffer = nullptr;
++        Hyprutils::OS::CFileDescriptor fence;
++    };
++
+     void arrangeLayerArray(PHLMONITOR, const std::vector<PHLLSREF>&, bool, CBox*);
+     void renderWorkspace(PHLMONITOR pMonitor, PHLWORKSPACE pWorkspace, const Time::steady_tp& now, const CBox& geometry);
+     void renderWorkspaceWindowsFullscreen(PHLMONITOR, PHLWORKSPACE, const Time::steady_tp&); // renders workspace windows (fullscreen) (tiled, floating, pinned, but no special)
+@@ -143,16 +148,16 @@ class CHyprRenderer {
+     bool shouldBlur(PHLWINDOW w);
+     bool shouldBlur(WP<Desktop::View::CPopup> p);
+ 
+-    bool m_cursorHidden                           = false;
+-    bool m_cursorHiddenByCondition                = false;
+-    bool m_cursorHasSurface                       = false;
+-    SP<CRenderbuffer>       m_currentRenderbuffer = nullptr;
+-    SP<Aquamarine::IBuffer> m_currentBuffer       = nullptr;
+-    eRenderMode             m_renderMode          = RENDER_MODE_NORMAL;
+-    bool                    m_nvidia              = false;
+-    bool                    m_intel               = false;
+-    bool                    m_software            = false;
+-    bool                    m_mgpu                = false;
++    bool m_cursorHidden                     = false;
++    bool m_cursorHiddenByCondition          = false;
++    bool m_cursorHasSurface                 = false;
++    SP<CRenderbuffer> m_currentRenderbuffer = nullptr;
++    SBuffer           m_currentBuffer       = {};
++    eRenderMode       m_renderMode          = RENDER_MODE_NORMAL;
++    bool              m_nvidia              = false;
++    bool              m_intel               = false;
++    bool              m_software            = false;
++    bool              m_mgpu                = false;
+ 
+     struct {
+         bool hiddenOnTouch    = false;

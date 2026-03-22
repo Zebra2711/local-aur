@@ -1,0 +1,48 @@
+diff --git a/src/protocols/ExtWorkspace.cpp b/src/protocols/ExtWorkspace.cpp
+index 8b6c010dbfe..a0b570ebd92 100644
+--- a/src/protocols/ExtWorkspace.cpp
++++ b/src/protocols/ExtWorkspace.cpp
+@@ -31,9 +31,6 @@ CExtWorkspaceGroupResource::CExtWorkspaceGroupResource(WP<CExtWorkspaceManagerRe
+         if (output->client() == m_resource->client())
+             m_resource->sendOutputEnter(output->getResource()->resource());
+     });
+-
+-    m_manager->sendGroupToWorkspaces(m_self);
+-    m_manager->scheduleDone();
+ }
+ 
+ bool CExtWorkspaceGroupResource::good() const {
+@@ -46,6 +43,11 @@ WP<CExtWorkspaceGroupResource> CExtWorkspaceGroupResource::fromResource(wl_resou
+     return data ? data->m_self : WP<CExtWorkspaceGroupResource>();
+ }
+ 
++void CExtWorkspaceGroupResource::sendToWorkspaces() {
++    m_manager->sendGroupToWorkspaces(m_self);
++    m_manager->scheduleDone();
++}
++
+ void CExtWorkspaceGroupResource::workspaceEnter(const WP<CExtWorkspaceHandleV1>& handle) {
+     m_resource->sendWorkspaceEnter(handle.get());
+ }
+@@ -265,6 +267,7 @@ void CExtWorkspaceManagerResource::onMonitorCreated(const PHLMONITOR& monitor) {
+     auto& group = PROTO::extWorkspace->m_groups.emplace_back(
+         makeUnique<CExtWorkspaceGroupResource>(m_self, makeUnique<CExtWorkspaceGroupHandleV1>(m_resource->client(), m_resource->version(), 0), monitor));
+     group->m_self = group;
++    group->sendToWorkspaces();
+ 
+     if UNLIKELY (!group->good()) {
+         LOGM(ERR, "Couldn't create a workspace group object");
+diff --git a/src/protocols/ExtWorkspace.hpp b/src/protocols/ExtWorkspace.hpp
+index efaac3fe568..ba4aeeae6da 100644
+--- a/src/protocols/ExtWorkspace.hpp
++++ b/src/protocols/ExtWorkspace.hpp
+@@ -21,6 +21,8 @@ class CExtWorkspaceGroupResource {
+     void                                  workspaceEnter(const WP<CExtWorkspaceHandleV1>&);
+     void                                  workspaceLeave(const WP<CExtWorkspaceHandleV1>&);
+ 
++    void                                  sendToWorkspaces();
++
+     PHLMONITORREF                         m_monitor;
+ 
+   private:
+

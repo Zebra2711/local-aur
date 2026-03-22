@@ -1,0 +1,158 @@
+diff --git a/src/layout/algorithm/Algorithm.cpp b/src/layout/algorithm/Algorithm.cpp
+index cfb5b7e3904..b83a03a35e2 100644
+--- a/src/layout/algorithm/Algorithm.cpp
++++ b/src/layout/algorithm/Algorithm.cpp
+@@ -105,7 +105,10 @@ void CAlgorithm::recalculate() {
+     m_floating->recalculate();
+ 
+     const auto PWORKSPACE = m_space->workspace();
+-    const auto PMONITOR   = PWORKSPACE->m_monitor;
++    if (!PWORKSPACE)
++        return;
++
++    const auto PMONITOR = PWORKSPACE->m_monitor;
+ 
+     if (PWORKSPACE->m_hasFullscreenWindow && PMONITOR) {
+         // massive hack from the fullscreen func
+diff --git a/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.cpp b/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.cpp
+index 7b9a17524f0..e3f326e8c30 100644
+--- a/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.cpp
++++ b/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.cpp
+@@ -422,7 +422,8 @@ SP<SColumnData> SScrollingData::atCenter() {
+ }
+ 
+ void SScrollingData::recalculate(bool forceInstant) {
+-    if (!algorithm->m_parent->space()->workspace() || algorithm->m_parent->space()->workspace()->m_hasFullscreenWindow)
++    if (!algorithm->m_parent || !algorithm->m_parent->space() || !algorithm->m_parent->space()->workspace() || !algorithm->m_parent->space()->workspace()->m_monitor ||
++        algorithm->m_parent->space()->workspace()->m_hasFullscreenWindow)
+         return;
+ 
+     static const auto PFSONONE = CConfigValue<Hyprlang::INT>("scrolling:fullscreen_on_one_column");
+@@ -1505,6 +1506,9 @@ eScrollDirection CScrollingAlgorithm::getDynamicDirection() {
+ }
+ 
+ CBox CScrollingAlgorithm::usableArea() {
++    if (!m_parent || !m_parent->space())
++        return {};
++
+     CBox box = m_parent->space()->workArea();
+ 
+     // doesn't matter, this happens when this algo is about to be destroyed
+diff --git a/src/layout/space/Space.cpp b/src/layout/space/Space.cpp
+index db3925f6fb6..a02ba5173c0 100644
+--- a/src/layout/space/Space.cpp
++++ b/src/layout/space/Space.cpp
+@@ -21,8 +21,16 @@ CSpace::CSpace(PHLWORKSPACE parent) : m_parent(parent) {
+ 
+     // NOLINTNEXTLINE
+     m_geomUpdateCallback = Event::bus()->m_events.monitor.layoutChanged.listen([this] {
++        // During monitor disconnect/reconnect (e.g. sleep/wake), some workspaces
++        // may have stale or null monitors. Guard against that to avoid crashing
++        // when recalculating layout for workspaces mid-migration.
++        if (!m_parent || !m_parent->m_monitor)
++            return;
++
+         recheckWorkArea();
+-        m_algorithm->recalculate();
++
++        if (m_algorithm)
++            m_algorithm->recalculate();
+     });
+ }
+ 
+diff --git a/src/protocols/SessionLock.cpp b/src/protocols/SessionLock.cpp
+index 88231f383b9..de2b96f227c 100644
+--- a/src/protocols/SessionLock.cpp
++++ b/src/protocols/SessionLock.cpp
+@@ -62,11 +62,11 @@ CSessionLockSurface::CSessionLockSurface(SP<CExtSessionLockSurfaceV1> resource_,
+ 
+         if (m_surface)
+             m_surface->enter(m_monitor.lock());
++
++        m_listeners.monitorMode = m_monitor->m_events.modeChanged.listen([this] { sendConfigure(); });
+     }
+ 
+     sendConfigure();
+-
+-    m_listeners.monitorMode = m_monitor->m_events.modeChanged.listen([this] { sendConfigure(); });
+ }
+ 
+ CSessionLockSurface::~CSessionLockSurface() {
+@@ -203,8 +203,17 @@ void CSessionLockProtocol::onLock(CExtSessionLockManagerV1* pMgr, uint32_t id) {
+ void CSessionLockProtocol::onGetLockSurface(CExtSessionLockV1* lock, uint32_t id, wl_resource* surface, wl_resource* output) {
+     LOGM(Log::DEBUG, "New sessionLockSurface with id {}", id);
+ 
+-    auto             PSURFACE = CWLSurfaceResource::fromResource(surface);
+-    auto             PMONITOR = CWLOutputResource::fromResource(output)->m_monitor.lock();
++    auto PSURFACE  = CWLSurfaceResource::fromResource(surface);
++    auto OUTPUTRES = CWLOutputResource::fromResource(output);
++    if (!OUTPUTRES) {
++        LOGM(Log::ERR, "onGetLockSurface: invalid output resource");
++        return;
++    }
++    auto PMONITOR = OUTPUTRES->m_monitor.lock();
++    if (!PMONITOR) {
++        LOGM(Log::ERR, "onGetLockSurface: monitor is gone for output resource");
++        return;
++    }
+ 
+     SP<CSessionLock> sessionLock;
+     for (auto const& l : m_locks) {
+diff --git a/src/render/GLRenderer.cpp b/src/render/GLRenderer.cpp
+index c1f64837102..5adb9bb8491 100644
+--- a/src/render/GLRenderer.cpp
++++ b/src/render/GLRenderer.cpp
+@@ -394,6 +394,8 @@ void CHyprGLRenderer::draw(CTextureMatteElement* element, const CRegion& damage)
+ };
+ 
+ SP<ITexture> CHyprGLRenderer::getBlurTexture(PHLMONITORREF pMonitor) {
++    if (!pMonitor->m_blurFB)
++        return nullptr;
+     return pMonitor->m_blurFB->getTexture();
+ }
+ 
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index e9ca8bafb7e..1c30e3edad3 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -1029,7 +1029,8 @@ void CHyprOpenGLImpl::renderRectWithBlurInternal(const CBox& box, const CHyprCol
+     CRegion damage{g_pHyprRenderer->m_renderData.damage};
+     damage.intersect(box);
+ 
+-    auto POUTFB = data.xray ? g_pHyprRenderer->m_renderData.pMonitor->m_blurFB->getTexture() : g_pHyprRenderer->blurMainFramebuffer(data.blurA, &damage);
++    auto POUTFB = data.xray ? (g_pHyprRenderer->m_renderData.pMonitor->m_blurFB ? g_pHyprRenderer->m_renderData.pMonitor->m_blurFB->getTexture() : nullptr) :
++                              g_pHyprRenderer->blurMainFramebuffer(data.blurA, &damage);
+ 
+     g_pHyprRenderer->m_renderData.currentFB->bind();
+ 
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 9872b83e6ec..bf3740da3bc 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -1069,7 +1069,7 @@ void IHyprRenderer::drawTex(CTexPassElement* element, const CRegion& damage) {
+             element->m_data.blurredBG = blurMainFramebuffer(element->m_data.a, &inverseOpaque);
+             m_renderData.currentFB->bind();
+         } else
+-            element->m_data.blurredBG = m_renderData.pMonitor->m_blurFB->getTexture();
++            element->m_data.blurredBG = m_renderData.pMonitor->m_blurFB ? m_renderData.pMonitor->m_blurFB->getTexture() : nullptr;
+ 
+         draw(element, damage);
+     } else
+@@ -1667,6 +1667,8 @@ SP<ITexture> IHyprRenderer::loadAsset(const std::string& filename) {
+ }
+ 
+ SP<ITexture> IHyprRenderer::getBlurTexture(PHLMONITORREF pMonitor) {
++    if (!pMonitor->m_blurFB)
++        return nullptr;
+     return pMonitor->m_blurFB->getTexture();
+ }
+ 
+@@ -2155,6 +2157,8 @@ void IHyprRenderer::preBlurForCurrentMonitor(CRegion* fakeDamage) {
+     const auto blurredTex = blurMainFramebuffer(1, fakeDamage);
+ 
+     // render onto blurFB
++    if (!m_renderData.pMonitor->m_blurFB)
++        return;
+     m_renderData.pMonitor->m_blurFB->alloc(m_renderData.pMonitor->m_pixelSize.x, m_renderData.pMonitor->m_pixelSize.y, m_renderData.pMonitor->m_output->state->state().drmFormat);
+     m_renderData.pMonitor->m_blurFB->bind();
+ 

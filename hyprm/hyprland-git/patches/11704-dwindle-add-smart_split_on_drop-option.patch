@@ -1,0 +1,188 @@
+diff --git a/hyprtester/src/tests/main/smartSplit.cpp b/hyprtester/src/tests/main/smartSplit.cpp
+new file mode 100644
+index 00000000000..ebe6b82552d
+--- /dev/null
++++ b/hyprtester/src/tests/main/smartSplit.cpp
+@@ -0,0 +1,126 @@
++#include "tests.hpp"
++#include "../../shared.hpp"
++#include "../../hyprctlCompat.hpp"
++#include <hyprutils/os/Process.hpp>
++#include <hyprutils/memory/WeakPtr.hpp>
++#include "../shared.hpp"
++
++static int ret = 0;
++
++using namespace Hyprutils::OS;
++using namespace Hyprutils::Memory;
++
++static void testConfigRegistration() {
++    NLog::log("{}Testing config: dwindle:smart_split_on_drop", Colors::GREEN);
++    
++    NLog::log("{}Setting dwindle:smart_split_on_drop to true", Colors::YELLOW);
++    OK(getFromSocket("/keyword dwindle:smart_split_on_drop true"));
++    
++    auto configStr = getFromSocket("/getoption dwindle:smart_split_on_drop");
++    EXPECT_CONTAINS(configStr, "1");
++    
++    NLog::log("{}Setting dwindle:smart_split_on_drop to false", Colors::YELLOW);
++    OK(getFromSocket("/keyword dwindle:smart_split_on_drop false"));
++    
++    configStr = getFromSocket("/getoption dwindle:smart_split_on_drop");
++    EXPECT_CONTAINS(configStr, "0");
++}
++
++static void testSmartSplitBehavior() {
++    NLog::log("{}Testing smart split behavior with smart_split_on_drop enabled", Colors::YELLOW);
++    
++    NLog::log("{}Switching to workspace \"smart_split\"", Colors::YELLOW);
++    getFromSocket("/dispatch workspace name:smart_split");
++    
++    OK(getFromSocket("/keyword dwindle:smart_split 1"));
++    OK(getFromSocket("/keyword dwindle:smart_split_on_drop true"));
++    OK(getFromSocket("/keyword dwindle:split_width_multiplier 1.5"));
++    
++    if (!Tests::spawnKitty("kitty_A"))
++        return;
++    
++    NLog::log("{}Expecting 1 window", Colors::YELLOW);
++    EXPECT(Tests::windowCount(), 1);
++    
++    if (!Tests::spawnKitty("kitty_B"))
++        return;
++    
++    NLog::log("{}Expecting 2 windows", Colors::YELLOW);
++    EXPECT(Tests::windowCount(), 2);
++    
++    NLog::log("{}Windows created successfully with smart_split_on_drop enabled", Colors::YELLOW);
++    
++    Tests::killAllWindows();
++    EXPECT(Tests::windowCount(), 0);
++}
++
++static void testSmartSplitOnDropBehavior() {
++    NLog::log("{}Testing smart split with drop simulation", Colors::YELLOW);
++    
++    NLog::log("{}Switching to workspace \"smart_split_drop\"", Colors::YELLOW);
++    getFromSocket("/dispatch workspace name:smart_split_drop");
++    
++    OK(getFromSocket("/keyword dwindle:smart_split 1"));
++    OK(getFromSocket("/keyword dwindle:smart_split_on_drop true"));
++    OK(getFromSocket("/keyword dwindle:split_width_multiplier 1.5"));
++    
++    if (!Tests::spawnKitty("kitty_A"))
++        return;
++    
++    NLog::log("{}Expecting 1 window", Colors::YELLOW);
++    EXPECT(Tests::windowCount(), 1);
++    
++    if (!Tests::spawnKitty("kitty_B"))
++        return;
++    
++    OK(getFromSocket("/dispatch moveactive exact 100 100"));
++    
++    NLog::log("{}Expecting 2 windows after drop simulation", Colors::YELLOW);
++    EXPECT(Tests::windowCount(), 2);
++    
++    NLog::log("{}Windows created and moved successfully with smart split on drop", Colors::YELLOW);
++    
++    Tests::killAllWindows();
++    EXPECT(Tests::windowCount(), 0);
++}
++
++static void testDefaultBehavior() {
++    NLog::log("{}Testing default behavior with smart_split_on_drop disabled", Colors::YELLOW);
++    
++    NLog::log("{}Switching to workspace \"default_behavior\"", Colors::YELLOW);
++    getFromSocket("/dispatch workspace name:default_behavior");
++    
++    OK(getFromSocket("/keyword dwindle:smart_split 1"));
++    OK(getFromSocket("/keyword dwindle:smart_split_on_drop false"));
++    OK(getFromSocket("/keyword dwindle:split_width_multiplier 1.5"));
++    
++    if (!Tests::spawnKitty("kitty_A"))
++        return;
++    
++    NLog::log("{}Expecting 1 window", Colors::YELLOW);
++    EXPECT(Tests::windowCount(), 1);
++    
++    if (!Tests::spawnKitty("kitty_B"))
++        return;
++    
++    NLog::log("{}Expecting 2 windows", Colors::YELLOW);
++    EXPECT(Tests::windowCount(), 2);
++    
++    NLog::log("{}Windows created successfully with smart_split enabled for all operations", Colors::YELLOW);
++    
++    Tests::killAllWindows();
++    EXPECT(Tests::windowCount(), 0);
++}
++
++static bool test() {
++    NLog::log("{}Testing config: dwindle:smart_split_on_drop", Colors::GREEN);
++    
++    testConfigRegistration();
++    testSmartSplitBehavior();
++    testSmartSplitOnDropBehavior();
++    testDefaultBehavior();
++    
++    return !ret;
++}
++
++REGISTER_TEST_FN(test)
+diff --git a/src/config/ConfigDescriptions.hpp b/src/config/ConfigDescriptions.hpp
+index a3a6e1b01a8..1b31d8bea10 100644
+--- a/src/config/ConfigDescriptions.hpp
++++ b/src/config/ConfigDescriptions.hpp
+@@ -1793,6 +1793,13 @@ inline static const std::vector<SConfigOptionDescription> CONFIG_OPTIONS = {
+         .type        = CONFIG_OPTION_BOOL,
+         .data        = SConfigOptionDescription::SBoolData{false},
+     },
++    SConfigOptionDescription{
++        .value = "dwindle:smart_split_on_drop",
++        .description =
++            "if enabled, smart split (cursor-position-based splitting) is only used for mouse drop operations. Otherwise, uses regular split_width_multiplier-based splitting.",
++        .type = CONFIG_OPTION_BOOL,
++        .data = SConfigOptionDescription::SBoolData{false},
++    },
+     SConfigOptionDescription{
+         .value = "dwindle:smart_resizing",
+         .description =
+diff --git a/src/config/ConfigManager.cpp b/src/config/ConfigManager.cpp
+index 78ca1fe1978..4db14d44a25 100644
+--- a/src/config/ConfigManager.cpp
++++ b/src/config/ConfigManager.cpp
+@@ -625,6 +625,7 @@ CConfigManager::CConfigManager() {
+     registerConfigVar("dwindle:split_bias", Hyprlang::INT{0});
+     registerConfigVar("dwindle:smart_split", Hyprlang::INT{0});
+     registerConfigVar("dwindle:smart_resizing", Hyprlang::INT{1});
++    registerConfigVar("dwindle:smart_split_on_drop", Hyprlang::INT{0});
+     registerConfigVar("dwindle:precise_mouse_move", Hyprlang::INT{0});
+     registerConfigVar("dwindle:single_window_aspect_ratio", Hyprlang::VEC2{0, 0});
+     registerConfigVar("dwindle:single_window_aspect_ratio_tolerance", {0.1f});
+diff --git a/src/layout/DwindleLayout.cpp b/src/layout/DwindleLayout.cpp
+index 513da47b0ef..0cd3790c933 100644
+--- a/src/layout/DwindleLayout.cpp
++++ b/src/layout/DwindleLayout.cpp
+@@ -338,7 +338,8 @@ void CHyprDwindleLayout::onWindowCreatedTiling(PHLWINDOW pWindow, eDirection dir
+     NEWPARENT->isNode      = true; // it is a node
+     NEWPARENT->splitRatio  = std::clamp(*PDEFAULTSPLIT, 0.1f, 1.9f);
+ 
+-    static auto PWIDTHMULTIPLIER = CConfigValue<Hyprlang::FLOAT>("dwindle:split_width_multiplier");
++    static auto PWIDTHMULTIPLIER   = CConfigValue<Hyprlang::FLOAT>("dwindle:split_width_multiplier");
++    static auto PSMARTSPLITONDDROP = CConfigValue<Hyprlang::INT>("dwindle:smart_split_on_drop");
+ 
+     // if cursor over first child, make it first, etc
+     const auto SIDEBYSIDE = NEWPARENT->box.w > NEWPARENT->box.h * *PWIDTHMULTIPLIER;
+@@ -373,7 +374,10 @@ void CHyprDwindleLayout::onWindowCreatedTiling(PHLWINDOW pWindow, eDirection dir
+         // whether or not the override persists after opening one window
+         if (*PERMANENTDIRECTIONOVERRIDE == 0)
+             m_overrideDirection = DIRECTION_DEFAULT;
+-    } else if (*PSMARTSPLIT == 1) {
++    } else if (*PSMARTSPLIT == 1 && (!*PSMARTSPLITONDDROP || g_pInputManager->m_wasDraggingWindow)) {
++        // Smart split with cursor position - applies when:
++        // 1. smart_split_on_drop is disabled (use smart_split for everything)
++        // 2. OR this is a mouse drop operation (only use smart split for drops)
+         const auto PARENT_CENTER      = NEWPARENT->box.pos() + NEWPARENT->box.size() / 2;
+         const auto PARENT_PROPORTIONS = NEWPARENT->box.h / NEWPARENT->box.w;
+         const auto DELTA              = MOUSECOORDS - PARENT_CENTER;

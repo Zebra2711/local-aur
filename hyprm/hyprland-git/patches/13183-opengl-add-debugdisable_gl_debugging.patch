@@ -1,0 +1,85 @@
+diff --git a/src/config/ConfigDescriptions.hpp b/src/config/ConfigDescriptions.hpp
+index aaaa070420d..a4e97f9d8b1 100644
+--- a/src/config/ConfigDescriptions.hpp
++++ b/src/config/ConfigDescriptions.hpp
+@@ -1752,6 +1752,12 @@ inline static const std::vector<SConfigOptionDescription> CONFIG_OPTIONS = {
+         .type        = CONFIG_OPTION_BOOL,
+         .data        = SConfigOptionDescription::SBoolData{false},
+     },
++    SConfigOptionDescription{
++        .value       = "debug:disable_gl_debugging",
++        .description = "disable OpenGL debugging and error checking, they hurt performance.",
++        .type        = CONFIG_OPTION_BOOL,
++        .data        = SConfigOptionDescription::SBoolData{true},
++    },
+     SConfigOptionDescription{
+         .value       = "debug:disable_logs",
+         .description = "disable logging to a file",
+diff --git a/src/config/ConfigManager.cpp b/src/config/ConfigManager.cpp
+index 98e8c0e89c5..8ed6d205c7f 100644
+--- a/src/config/ConfigManager.cpp
++++ b/src/config/ConfigManager.cpp
+@@ -561,6 +561,7 @@ CConfigManager::CConfigManager() {
+     registerConfigVar("debug:overlay", Hyprlang::INT{0});
+     registerConfigVar("debug:damage_blink", Hyprlang::INT{0});
+     registerConfigVar("debug:pass", Hyprlang::INT{0});
++    registerConfigVar("debug:disable_gl_debugging", Hyprlang::INT{1});
+     registerConfigVar("debug:disable_logs", Hyprlang::INT{1});
+     registerConfigVar("debug:disable_time", Hyprlang::INT{1});
+     registerConfigVar("debug:enable_stdout_logs", Hyprlang::INT{0});
+diff --git a/src/macros.hpp b/src/macros.hpp
+index 1b55bacdbfc..d8f2ceec21b 100644
+--- a/src/macros.hpp
++++ b/src/macros.hpp
+@@ -96,10 +96,13 @@
+ #define GLCALL(__CALL__)                                                                                                                                                           \
+     {                                                                                                                                                                              \
+         __CALL__;                                                                                                                                                                  \
+-        auto err = glGetError();                                                                                                                                                   \
+-        if (err != GL_NO_ERROR) {                                                                                                                                                  \
+-            Log::logger->log(Log::ERR, "[GLES] Error in call at {}@{}: 0x{:x}", __LINE__,                                                                                          \
+-                             ([]() constexpr -> std::string { return std::string(__FILE__).substr(std::string(__FILE__).find_last_of('/') + 1); })(), err);                        \
++        static const auto GLDEBUG = CConfigValue<Hyprlang::INT>("debug:disable_gl_debugging");                                                                                     \
++        if (!*GLDEBUG) {                                                                                                                                                           \
++            auto err = glGetError();                                                                                                                                               \
++            if (err != GL_NO_ERROR) {                                                                                                                                              \
++                Log::logger->log(Log::ERR, "[GLES] Error in call at {}@{}: 0x{:x}", __LINE__,                                                                                      \
++                                 ([]() constexpr -> std::string { return std::string(__FILE__).substr(std::string(__FILE__).find_last_of('/') + 1); })(), err);                    \
++            }                                                                                                                                                                      \
+         }                                                                                                                                                                          \
+     }
+ 
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index e3690ecdab1..1c1ffedd4f1 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -304,7 +304,8 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
+         loadGLProc(&m_proc.eglQueryDisplayAttribEXT, "eglQueryDisplayAttribEXT");
+     }
+ 
+-    if (EGLEXTENSIONS.contains("EGL_KHR_debug")) {
++    static const auto GLDEBUG = CConfigValue<Hyprlang::INT>("debug:disable_gl_debugging");
++    if (EGLEXTENSIONS.contains("EGL_KHR_debug") && !*GLDEBUG) {
+         loadGLProc(&m_proc.eglDebugMessageControlKHR, "eglDebugMessageControlKHR");
+         static const EGLAttrib debugAttrs[] = {
+             EGL_DEBUG_MSG_CRITICAL_KHR, EGL_TRUE, EGL_DEBUG_MSG_ERROR_KHR, EGL_TRUE, EGL_DEBUG_MSG_WARN_KHR, EGL_TRUE, EGL_DEBUG_MSG_INFO_KHR, EGL_TRUE, EGL_NONE,
+@@ -838,11 +839,15 @@ void CHyprOpenGLImpl::end() {
+     if UNLIKELY (m_renderData.pCurrentMonData->offMainFB.isAllocated())
+         m_renderData.pCurrentMonData->offMainFB.release();
+ 
+-    // check for gl errors
+-    const GLenum ERR = glGetError();
++    static const auto GLDEBUG = CConfigValue<Hyprlang::INT>("debug:disable_gl_debugging");
+ 
+-    if UNLIKELY (ERR == GL_CONTEXT_LOST) /* We don't have infra to recover from this */
+-        RASSERT(false, "glGetError at Opengl::end() returned GL_CONTEXT_LOST. Cannot continue until proper GPU reset handling is implemented.");
++    if (!*GLDEBUG) {
++        // check for gl errors
++        const GLenum ERR = glGetError();
++
++        if UNLIKELY (ERR == GL_CONTEXT_LOST) /* We don't have infra to recover from this */
++            RASSERT(false, "glGetError at Opengl::end() returned GL_CONTEXT_LOST. Cannot continue until proper GPU reset handling is implemented.");
++    }
+ }
+ 
+ void CHyprOpenGLImpl::setDamage(const CRegion& damage_, std::optional<CRegion> finalDamage) {

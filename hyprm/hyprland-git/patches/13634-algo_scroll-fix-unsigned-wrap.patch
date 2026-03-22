@@ -1,0 +1,14 @@
+diff --git a/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.cpp b/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.cpp
+index ae7c6eccdd9..7b9a17524f0 100644
+--- a/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.cpp
++++ b/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.cpp
+@@ -260,6 +260,9 @@ bool SColumnData::up(SP<SScrollingTargetData> w) {
+ }
+ 
+ bool SColumnData::down(SP<SScrollingTargetData> w) {
++    if (targetDatas.empty())
++        return false;
++
+     for (size_t i = 0; i < targetDatas.size() - 1; ++i) {
+         if (targetDatas[i] != w)
+             continue;

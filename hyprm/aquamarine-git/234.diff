@@ -1,0 +1,37 @@
+diff --git a/src/backend/drm/Renderer.cpp b/src/backend/drm/Renderer.cpp
+index a8e9c69..ba93d17 100644
+--- a/src/backend/drm/Renderer.cpp
++++ b/src/backend/drm/Renderer.cpp
+@@ -453,6 +453,7 @@ void CDRMRenderer::initContext() {
+     exts.EXT_create_context_robustness      = EGLEXTENSIONS.contains("EXT_create_context_robustness");
+     exts.EXT_image_dma_buf_import           = EGLEXTENSIONS.contains("EXT_image_dma_buf_import");
+     exts.EXT_image_dma_buf_import_modifiers = EGLEXTENSIONS.contains("EXT_image_dma_buf_import_modifiers");
++    exts.KHR_context_flush_control          = EGLEXTENSIONS.contains("EGL_KHR_context_flush_control");
+ 
+     std::vector<EGLint> attrs;
+ 
+@@ -468,6 +469,12 @@ void CDRMRenderer::initContext() {
+         attrs.push_back(EGL_LOSE_CONTEXT_ON_RESET_EXT);
+     }
+ 
++    if (exts.KHR_context_flush_control) {
++        backend->log(AQ_LOG_DEBUG, "CDRMRenderer: Using KHR_context_flush_control");
++        attrs.push_back(EGL_CONTEXT_RELEASE_BEHAVIOR_KHR);
++        attrs.push_back(EGL_CONTEXT_RELEASE_BEHAVIOR_NONE_KHR); // or _FLUSH_KHR
++    }
++
+     attrs.push_back(EGL_CONTEXT_OPENGL_DEBUG);
+     attrs.push_back(Aquamarine::isTrace() ? EGL_TRUE : EGL_FALSE);
+ 
+diff --git a/src/backend/drm/Renderer.hpp b/src/backend/drm/Renderer.hpp
+index 99a15f7..a2e3bb7 100644
+--- a/src/backend/drm/Renderer.hpp
++++ b/src/backend/drm/Renderer.hpp
+@@ -137,6 +137,7 @@ namespace Aquamarine {
+             bool KHR_platform_gbm                   = false;
+             bool EXT_image_dma_buf_import           = false;
+             bool EXT_image_dma_buf_import_modifiers = false;
++            bool KHR_context_flush_control          = false;
+             bool KHR_display_reference              = false;
+             bool IMG_context_priority               = false;
+             bool EXT_create_context_robustness      = false;

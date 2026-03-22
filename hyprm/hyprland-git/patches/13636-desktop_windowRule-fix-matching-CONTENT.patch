@@ -1,0 +1,72 @@
+diff --git a/hyprtester/src/tests/main/window.cpp b/hyprtester/src/tests/main/window.cpp
+index beac02988db..9dadf3d5b87 100644
+--- a/hyprtester/src/tests/main/window.cpp
++++ b/hyprtester/src/tests/main/window.cpp
+@@ -658,6 +658,33 @@ static bool testWindowRuleWorkspaceEmpty() {
+     return true;
+ }
+ 
++static void testContentRules() {
++    NLog::log("{}Testing content window rules", Colors::YELLOW);
++
++    // kill me PLEASE
++
++    OK(getFromSocket("/keyword windowrule match:class kitty_bitch, content game"));
++    OK(getFromSocket("/keyword windowrule match:content game, border_size 10"));
++    OK(getFromSocket("/keyword windowrule match:content 3, opacity 0.5"));
++
++    getFromSocket("/dispatch workspace 420");
++
++    if (!spawnKitty("kitty_bitch")) {
++        NLog::log("{}Error: failed to spawn kitty", Colors::RED);
++        return;
++    }
++
++    {
++        auto res = getFromSocket("/getprop active border_size");
++        EXPECT_CONTAINS(res, "10");
++    }
++
++    {
++        auto res = getFromSocket("/getprop active opacity");
++        EXPECT_CONTAINS(res, "0.5");
++    }
++}
++
+ static bool test() {
+     NLog::log("{}Testing windows", Colors::GREEN);
+ 
+@@ -1122,6 +1149,7 @@ static bool test() {
+     testWindowRuleFocusOnActivate();
+     testPinnedWorkspacesValid();
+     testWindowRuleWorkspaceEmpty();
++    testContentRules();
+ 
+     NLog::log("{}Reloading config", Colors::YELLOW);
+     OK(getFromSocket("/reload"));
+diff --git a/src/desktop/rule/Rule.cpp b/src/desktop/rule/Rule.cpp
+index ab5525e8aa7..5e3141cdd71 100644
+--- a/src/desktop/rule/Rule.cpp
++++ b/src/desktop/rule/Rule.cpp
+@@ -48,7 +48,7 @@ static const std::unordered_map<eRuleProperty, eRuleMatchEngine> RULE_ENGINES =
+     {RULE_PROP_FULLSCREENSTATE_INTERNAL, RULE_MATCH_ENGINE_INT}, //
+     {RULE_PROP_FULLSCREENSTATE_CLIENT, RULE_MATCH_ENGINE_INT},   //
+     {RULE_PROP_ON_WORKSPACE, RULE_MATCH_ENGINE_WORKSPACE},       //
+-    {RULE_PROP_CONTENT, RULE_MATCH_ENGINE_INT},                  //
++    {RULE_PROP_CONTENT, RULE_MATCH_ENGINE_REGEX},                //
+     {RULE_PROP_XDG_TAG, RULE_MATCH_ENGINE_REGEX},                //
+     {RULE_PROP_NAMESPACE, RULE_MATCH_ENGINE_REGEX},              //
+     {RULE_PROP_EXEC_TOKEN, RULE_MATCH_ENGINE_REGEX},             //
+diff --git a/src/desktop/rule/windowRule/WindowRule.cpp b/src/desktop/rule/windowRule/WindowRule.cpp
+index 8028e482dc3..08cd160300f 100644
+--- a/src/desktop/rule/windowRule/WindowRule.cpp
++++ b/src/desktop/rule/windowRule/WindowRule.cpp
+@@ -97,7 +97,7 @@ bool CWindowRule::matches(PHLWINDOW w, bool allowEnvLookup) {
+                     return false;
+                 break;
+             case RULE_PROP_CONTENT:
+-                if (!engine->match(w->getContentType()) && !engine->match(NContentType::toString(w->getContentType())))
++                if (!engine->match(std::format("{}", sc<size_t>(w->getContentType()))) && !engine->match(NContentType::toString(w->getContentType())))
+                     return false;
+                 break;
+             case RULE_PROP_XDG_TAG:

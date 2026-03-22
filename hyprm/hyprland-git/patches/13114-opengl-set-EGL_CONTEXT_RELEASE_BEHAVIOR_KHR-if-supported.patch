@@ -1,0 +1,37 @@
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index 715ca4f7aad..b00728ed815 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -160,6 +160,7 @@ void CHyprOpenGLImpl::initEGL(bool gbm) {
+     m_exts.EXT_create_context_robustness      = EGLEXTENSIONS.contains("EXT_create_context_robustness");
+     m_exts.EXT_image_dma_buf_import           = EGLEXTENSIONS.contains("EXT_image_dma_buf_import");
+     m_exts.EXT_image_dma_buf_import_modifiers = EGLEXTENSIONS.contains("EXT_image_dma_buf_import_modifiers");
++    m_exts.KHR_context_flush_control          = EGLEXTENSIONS.contains("EGL_KHR_context_flush_control");
+ 
+     if (m_exts.IMG_context_priority) {
+         Log::logger->log(Log::DEBUG, "EGL: IMG_context_priority supported, requesting high");
+@@ -173,6 +174,12 @@ void CHyprOpenGLImpl::initEGL(bool gbm) {
+         attrs.push_back(EGL_LOSE_CONTEXT_ON_RESET_EXT);
+     }
+ 
++    if (m_exts.KHR_context_flush_control) {
++        Log::logger->log(Log::DEBUG, "EGL: Using KHR_context_flush_control");
++        attrs.push_back(EGL_CONTEXT_RELEASE_BEHAVIOR_KHR);
++        attrs.push_back(EGL_CONTEXT_RELEASE_BEHAVIOR_NONE_KHR); // or _FLUSH_KHR
++    }
++
+     auto attrsNoVer = attrs;
+ 
+     attrs.push_back(EGL_CONTEXT_MAJOR_VERSION);
+diff --git a/src/render/OpenGL.hpp b/src/render/OpenGL.hpp
+index a538aa4b879..3df8322b07d 100644
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -361,6 +361,7 @@ class CHyprOpenGLImpl {
+         bool EXT_read_format_bgra               = false;
+         bool EXT_image_dma_buf_import           = false;
+         bool EXT_image_dma_buf_import_modifiers = false;
++        bool KHR_context_flush_control          = false;
+         bool KHR_display_reference              = false;
+         bool IMG_context_priority               = false;
+         bool EXT_create_context_robustness      = false;

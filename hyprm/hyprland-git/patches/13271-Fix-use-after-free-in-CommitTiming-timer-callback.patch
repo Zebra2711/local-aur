@@ -1,0 +1,19 @@
+diff --git a/src/protocols/CommitTiming.cpp b/src/protocols/CommitTiming.cpp
+index c1fca990af8..9cc2da83e4c 100644
+--- a/src/protocols/CommitTiming.cpp
++++ b/src/protocols/CommitTiming.cpp
+@@ -39,11 +39,11 @@ CCommitTimerResource::CCommitTimerResource(UP<CWpCommitTimerV1>&& resource_, SP<
+         if (!state->timer) {
+             state->timer = makeShared<CEventLoopTimer>(
+                 state->pendingTimeout,
+-                [this, state](SP<CEventLoopTimer> self, void* data) {
+-                    if (!m_surface || !state)
++                [surface = m_surface, state](SP<CEventLoopTimer> self, void* data) {
++                    if (!surface || !state)
+                         return;
+ 
+-                    m_surface->m_stateQueue.unlock(state, LOCK_REASON_TIMER);
++                    surface->m_stateQueue.unlock(state, LOCK_REASON_TIMER);
+                 },
+                 nullptr);
+             g_pEventLoopManager->addTimer(state->timer);

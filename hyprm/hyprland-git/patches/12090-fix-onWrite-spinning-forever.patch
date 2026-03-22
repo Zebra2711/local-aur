@@ -1,0 +1,104 @@
+diff --git a/src/xwayland/XWM.cpp b/src/xwayland/XWM.cpp
+index 570cea4e..aacb1840 100644
+--- a/src/xwayland/XWM.cpp
++++ b/src/xwayland/XWM.cpp
+@@ -1,3 +1,4 @@
++#include "debug/Log.hpp"
+ #include <cstddef>
+ #include <cstdint>
+ #include <memory>
+@@ -352,11 +353,24 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
+ void CXWM::handlePropertyNotify(xcb_property_notify_event_t* e) {
+     const auto XSURF = windowForXID(e->window);
+ 
++		/* NOTE: Doesn't work great since we create fake windows for each selector and fd transfer then instantly destroy them when complete.
++     * Doing some extra work for no reason. No need to log higher than LOG.
++     */
+     if (!XSURF) {
++				Debug::log(LOG, "[xwm] Target surface not found: {}, cleaning up transfers.", e->window);
++
++        m_clipboard.removeTransfer(e->window);
++        m_primarySelection.removeTransfer(e->window);
++        m_dndSelection.removeTransfer(e->window);
+         if (e->atom == HYPRATOMS["_XWAYLAND_GLOBAL_OUTPUT_SCALE"]) {
+             xcb_get_property_cookie_t cookie = xcb_get_property(getConnection(), 0, e->window, e->atom, XCB_ATOM_ANY, 0, 2048);
+             xcb_get_property_reply_t* reply  = xcb_get_property_reply(getConnection(), cookie, nullptr);
+             if (!reply) {
++								Debug::log(LOG, "[xwm] Failed to read property notify cookie, cleaning up transfers for window {}", e->window);
++
++								m_clipboard.removeTransfer(e->window);
++								m_primarySelection.removeTransfer(e->window);
++								m_dndSelection.removeTransfer(e->window);
+                 return;
+             }
+             if (reply->type == XCB_ATOM_CARDINAL) {
+@@ -1642,6 +1656,7 @@ int SXSelection::onWrite() {
+         Debug::log(LOG, "[xwm] cb transfer to wl client complete, read {} bytes", len);
+         if (!transfer->incremental) {
+             transfers.erase(it);
++            return 0;
+         } else {
+             free(transfer->propertyReply); // NOLINT(cppcoreguidelines-no-malloc)
+             transfer->propertyReply = nullptr;
+@@ -1652,6 +1667,10 @@ int SXSelection::onWrite() {
+     return 1;
+ }
+ 
++void SXSelection::removeTransfer(xcb_window_t& window) {
++    std::erase_if(transfers, [&window](const auto& t) { return t->incomingWindow == window; });
++}
++
+ SXTransfer::~SXTransfer() {
+     if (eventSource)
+         wl_event_source_remove(eventSource);
+diff --git a/src/xwayland/XWM.cpp.rej b/src/xwayland/XWM.cpp.rej
+new file mode 100644
+index 00000000..a7b6017e
+--- /dev/null
++++ b/src/xwayland/XWM.cpp.rej
+@@ -0,0 +1,32 @@
++--- src/xwayland/XWM.cpp
+++++ src/xwayland/XWM.cpp
++@@ -340,14 +341,27 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
++ void CXWM::handlePropertyNotify(xcb_property_notify_event_t* e) {
++     const auto XSURF = windowForXID(e->window);
++ 
++-    if (!XSURF)
+++    /* NOTE: Doesn't work great since we create fake windows for each selector and fd transfer then instantly destroy them when complete.
+++     * Doing some extra work for no reason. No need to log higher than LOG.
+++     */
+++    if (!XSURF) {
+++        Debug::log(LOG, "[xwm] Target surface not found: {}, cleaning up transfers.", e->window);
+++
+++        m_clipboard.removeTransfer(e->window);
+++        m_primarySelection.removeTransfer(e->window);
+++        m_dndSelection.removeTransfer(e->window);
++         return;
+++    }
++ 
++     xcb_get_property_cookie_t             cookie = xcb_get_property(getConnection(), 0, XSURF->m_xID, e->atom, XCB_ATOM_ANY, 0, 2048);
++     XCBReplyPtr<xcb_get_property_reply_t> reply(xcb_get_property_reply(getConnection(), cookie, nullptr));
++ 
++     if (!reply) {
++-        Debug::log(ERR, "[xwm] Failed to read property notify cookie");
+++        Debug::log(LOG, "[xwm] Failed to read property notify cookie, cleaning up transfers for window {}", e->window);
+++
+++        m_clipboard.removeTransfer(e->window);
+++        m_primarySelection.removeTransfer(e->window);
+++        m_dndSelection.removeTransfer(e->window);
++         return;
++     }
++ 
+diff --git a/src/xwayland/XWM.hpp b/src/xwayland/XWM.hpp
+index 9abf461c..aeb688c2 100644
+--- a/src/xwayland/XWM.hpp
++++ b/src/xwayland/XWM.hpp
+@@ -55,6 +55,8 @@ struct SXSelection {
+     int              onRead(int fd, uint32_t mask);
+     int              onWrite();
+ 
++    void             removeTransfer(xcb_window_t& window);
++
+     struct {
+         CHyprSignalListener setSelection;
+         CHyprSignalListener keyboardFocusChange;

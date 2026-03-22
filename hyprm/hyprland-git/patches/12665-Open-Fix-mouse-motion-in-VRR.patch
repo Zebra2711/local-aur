@@ -1,0 +1,398 @@
+diff --git a/src/Compositor.cpp b/src/Compositor.cpp
+index 3299113c805..0864d240dfe 100644
+--- a/src/Compositor.cpp
++++ b/src/Compositor.cpp
+@@ -3099,3 +3099,7 @@ std::optional<unsigned int> CCompositor::getVTNr() {
+ 
+     return ttynum;
+ }
++
++bool CCompositor::isVRRActiveOnAnyMonitor() const {
++    return std::ranges::any_of(m_monitors, [](const PHLMONITOR& m) { return m->m_vrrActive; });
++}
+diff --git a/src/Compositor.hpp b/src/Compositor.hpp
+index abcf7ec6874..afcda222caa 100644
+--- a/src/Compositor.hpp
++++ b/src/Compositor.hpp
+@@ -161,6 +161,7 @@ class CCompositor {
+     void                                onNewMonitor(SP<Aquamarine::IOutput> output);
+     void                                ensurePersistentWorkspacesPresent(const std::vector<SWorkspaceRule>& rules, PHLWORKSPACE pWorkspace = nullptr);
+     std::optional<unsigned int>         getVTNr();
++    bool                                isVRRActiveOnAnyMonitor() const;
+ 
+     NColorManagement::PImageDescription getPreferredImageDescription();
+     NColorManagement::PImageDescription getHDRImageDescription();
+diff --git a/src/config/ConfigManager.cpp b/src/config/ConfigManager.cpp
+index d5ffe8f2f8f..0208c71e4f0 100644
+--- a/src/config/ConfigManager.cpp
++++ b/src/config/ConfigManager.cpp
+@@ -3017,7 +3017,7 @@ bool CConfigManager::shouldUseSoftwareCursors(PHLMONITOR pMonitor) {
+     switch (*PNOHW) {
+         case 0: return false;
+         case 1: return true;
+-        case 2: return g_pHyprRenderer->isNvidia() && g_pHyprRenderer->isMgpu();
++        case 2: return g_pHyprRenderer->isNvidia() && (g_pHyprRenderer->isMgpu() || g_pCompositor->isVRRActiveOnAnyMonitor());
+         default: break;
+     }
+ 
+diff --git a/src/desktop/view/Window.cpp b/src/desktop/view/Window.cpp
+index 2559e0c4e31..47d2228628c 100644
+--- a/src/desktop/view/Window.cpp
++++ b/src/desktop/view/Window.cpp
+@@ -2595,20 +2595,7 @@ void CWindow::commitWindow() {
+ 
+     const auto PMONITOR = m_monitor.lock();
+ 
+-    if (PMONITOR)
+-        PMONITOR->debugLastPresentation(g_pSeatManager->m_isPointerFrameCommit ? "listener_commitWindow skip" : "listener_commitWindow");
+-
+-    if (g_pSeatManager->m_isPointerFrameCommit) {
+-        g_pSeatManager->m_isPointerFrameSkipped = false;
+-        g_pSeatManager->m_isPointerFrameCommit  = false;
+-    } else
+-        g_pHyprRenderer->damageSurface(wlSurface()->resource(), m_realPosition->goal().x, m_realPosition->goal().y, m_isX11 ? 1.0 / m_X11SurfaceScaledBy : 1.0);
+-
+-    if (g_pSeatManager->m_isPointerFrameSkipped) {
+-        g_pPointerManager->sendStoredMovement();
+-        g_pSeatManager->sendPointerFrame();
+-        g_pSeatManager->m_isPointerFrameCommit = true;
+-    }
++    g_pHyprRenderer->damageSurface(wlSurface()->resource(), m_realPosition->goal().x, m_realPosition->goal().y, m_isX11 ? 1.0 / m_X11SurfaceScaledBy : 1.0);
+ 
+     if (!m_isX11) {
+         m_subsurfaceHead->recheckDamageForSubsurfaces();
+diff --git a/src/helpers/Monitor.cpp b/src/helpers/Monitor.cpp
+index c042fe77f67..707ee83ef91 100644
+--- a/src/helpers/Monitor.cpp
++++ b/src/helpers/Monitor.cpp
+@@ -1043,8 +1043,10 @@ bool CMonitor::shouldSkipScheduleFrameOnMouseEvent() {
+     static auto PMINRR   = CConfigValue<Hyprlang::INT>("cursor:min_refresh_rate");
+ 
+     // skip scheduling extra frames for fullsreen apps with vrr
+-    const auto FS_WINDOW  = getFullscreenWindow();
+-    const bool shouldSkip = FS_WINDOW && (*PNOBREAK == 1 || (*PNOBREAK == 2 && FS_WINDOW->getContentType() == CONTENT_TYPE_GAME)) && m_output->state->state().adaptiveSync;
++    const auto FS_WINDOW          = getFullscreenWindow();
++    const bool shouldRenderCursor = g_pHyprRenderer->shouldRenderCursor();
++    const bool noBreak            = FS_WINDOW && (*PNOBREAK == 1 || (*PNOBREAK == 2 && FS_WINDOW->getContentType() == CONTENT_TYPE_GAME));
++    const bool shouldSkip         = (!shouldRenderCursor || noBreak) && m_output->state->state().adaptiveSync;
+ 
+     // keep requested minimum refresh rate
+     if (shouldSkip && *PMINRR && m_lastPresentationTimer.getMillis() > 1000.0f / *PMINRR) {
+diff --git a/src/managers/PointerManager.cpp b/src/managers/PointerManager.cpp
+index d2065d695dd..c97c5daf4af 100644
+--- a/src/managers/PointerManager.cpp
++++ b/src/managers/PointerManager.cpp
+@@ -738,17 +738,26 @@ Vector2D CPointerManager::closestValid(const Vector2D& pos) {
+ }
+ 
+ void CPointerManager::damageIfSoftware() {
++    if (g_pCompositor->m_unsafeState)
++        return;
++
+     auto b = getCursorBoxGlobal().expand(4);
+ 
+     for (auto const& mw : m_monitorStates) {
+-        if (mw->monitor.expired() || !mw->monitor->m_output)
++        auto monitor = mw->monitor.lock();
++        if (!monitor || !monitor->m_output || monitor->isMirror())
+             continue;
+ 
+-        if ((mw->softwareLocks > 0 || mw->hardwareFailed || g_pConfigManager->shouldUseSoftwareCursors(mw->monitor.lock())) &&
+-            b.overlaps({mw->monitor->m_position, mw->monitor->m_size})) {
+-            g_pHyprRenderer->damageBox(b, mw->monitor->shouldSkipScheduleFrameOnMouseEvent());
+-            break;
+-        }
++        auto usesSoftwareCursor = (mw->softwareLocks > 0 || mw->hardwareFailed || g_pConfigManager->shouldUseSoftwareCursors(monitor));
++        if (!usesSoftwareCursor)
++            continue;
++
++        auto shouldAddDamage = !monitor->shouldSkipScheduleFrameOnMouseEvent() && b.overlaps({monitor->m_position, monitor->m_size});
++        if (!shouldAddDamage)
++            continue;
++
++        CBox damageBox = b.copy().translate(-monitor->m_position).scale(monitor->m_scale).round();
++        monitor->addDamage(damageBox);
+     }
+ }
+ 
+@@ -925,20 +934,6 @@ void CPointerManager::attachPointer(SP<IPointer> pointer) {
+         PROTO::idle->onActivity();
+     });
+ 
+-    listener->frame = pointer->m_pointerEvents.frame.listen([] {
+-        bool shouldSkip = false;
+-        if (!g_pSeatManager->m_mouse.expired() && g_pInputManager->isLocked()) {
+-            auto PMONITOR = Desktop::focusState()->monitor().get();
+-            if (PMONITOR && PMONITOR->shouldSkipScheduleFrameOnMouseEvent()) {
+-                auto fsWindow = PMONITOR->m_activeWorkspace->getFullscreenWindow();
+-                shouldSkip    = fsWindow && fsWindow->m_isX11;
+-            }
+-        }
+-        g_pSeatManager->m_isPointerFrameSkipped = shouldSkip;
+-        if (!g_pSeatManager->m_isPointerFrameSkipped)
+-            g_pSeatManager->sendPointerFrame();
+-    });
+-
+     listener->swipeBegin = pointer->m_pointerEvents.swipeBegin.listen([](const IPointer::SSwipeBeginEvent& event) {
+         g_pInputManager->onSwipeBegin(event);
+ 
+@@ -1090,7 +1085,7 @@ void CPointerManager::detachTablet(SP<CTablet> tablet) {
+     std::erase_if(m_tabletListeners, [tablet](const auto& e) { return e->tablet.expired() || e->tablet == tablet; });
+ }
+ 
+-void CPointerManager::damageCursor(PHLMONITOR pMonitor) {
++void CPointerManager::damageCursor(PHLMONITOR pMonitor, bool skipFrameSchedule) {
+     for (auto const& mw : m_monitorStates) {
+         if (mw->monitor != pMonitor)
+             continue;
+@@ -1100,7 +1095,7 @@ void CPointerManager::damageCursor(PHLMONITOR pMonitor) {
+         if (b.empty())
+             return;
+ 
+-        g_pHyprRenderer->damageBox(b);
++        g_pHyprRenderer->damageBox(b, skipFrameSchedule);
+ 
+         return;
+     }
+@@ -1109,22 +1104,3 @@ void CPointerManager::damageCursor(PHLMONITOR pMonitor) {
+ Vector2D CPointerManager::cursorSizeLogical() {
+     return m_currentCursorImage.size / m_currentCursorImage.scale;
+ }
+-
+-void CPointerManager::storeMovement(uint64_t time, const Vector2D& delta, const Vector2D& deltaUnaccel) {
+-    m_storedTime = time;
+-    m_storedDelta += delta;
+-    m_storedUnaccel += deltaUnaccel;
+-}
+-
+-void CPointerManager::setStoredMovement(uint64_t time, const Vector2D& delta, const Vector2D& deltaUnaccel) {
+-    m_storedTime    = time;
+-    m_storedDelta   = delta;
+-    m_storedUnaccel = deltaUnaccel;
+-}
+-
+-void CPointerManager::sendStoredMovement() {
+-    PROTO::relativePointer->sendRelativeMotion(m_storedTime * 1000, m_storedDelta, m_storedUnaccel);
+-    m_storedTime    = 0;
+-    m_storedDelta   = Vector2D{};
+-    m_storedUnaccel = Vector2D{};
+-}
+diff --git a/src/managers/PointerManager.hpp b/src/managers/PointerManager.hpp
+index e7294fd4082..d60903a625c 100644
+--- a/src/managers/PointerManager.hpp
++++ b/src/managers/PointerManager.hpp
+@@ -55,14 +55,11 @@ class CPointerManager {
+     // this is needed e.g. during screensharing where
+     // the software cursors aren't locked during the cursor move, but they
+     // are rendered later.
+-    void damageCursor(PHLMONITOR pMonitor);
++    void damageCursor(PHLMONITOR pMonitor, bool skipFrameSchedule = false);
+ 
+     //
+     Vector2D position();
+     Vector2D cursorSizeLogical();
+-    void     storeMovement(uint64_t time, const Vector2D& delta, const Vector2D& deltaUnaccel);
+-    void     setStoredMovement(uint64_t time, const Vector2D& delta, const Vector2D& deltaUnaccel);
+-    void     sendStoredMovement();
+ 
+     void     recheckEnteredOutputs();
+ 
+@@ -95,7 +92,6 @@ class CPointerManager {
+         CHyprSignalListener motionAbsolute;
+         CHyprSignalListener button;
+         CHyprSignalListener axis;
+-        CHyprSignalListener frame;
+ 
+         CHyprSignalListener swipeBegin;
+         CHyprSignalListener swipeEnd;
+@@ -154,10 +150,6 @@ class CPointerManager {
+ 
+     Vector2D m_pointerPos = {0, 0};
+ 
+-    uint64_t m_storedTime    = 0;
+-    Vector2D m_storedDelta   = {0, 0};
+-    Vector2D m_storedUnaccel = {0, 0};
+-
+     struct SMonitorPointerState {
+         SMonitorPointerState(const PHLMONITOR& m) : monitor(m) {}
+         ~SMonitorPointerState() = default;
+diff --git a/src/managers/SeatManager.hpp b/src/managers/SeatManager.hpp
+index fe11f930838..21736e3ae1d 100644
+--- a/src/managers/SeatManager.hpp
++++ b/src/managers/SeatManager.hpp
+@@ -127,9 +127,6 @@ class CSeatManager {
+     void          setGrab(SP<CSeatGrab> grab); // nullptr removes
+     SP<CSeatGrab> m_seatGrab;
+ 
+-    bool          m_isPointerFrameSkipped = false;
+-    bool          m_isPointerFrameCommit  = false;
+-
+   private:
+     struct SSeatResourceContainer {
+         SSeatResourceContainer(SP<CWLSeatResource>);
+diff --git a/src/managers/animation/AnimationManager.cpp b/src/managers/animation/AnimationManager.cpp
+index 05ce693907d..67b068e2745 100644
+--- a/src/managers/animation/AnimationManager.cpp
++++ b/src/managers/animation/AnimationManager.cpp
+@@ -198,7 +198,7 @@ static void handleUpdate(CAnimatedVariable<VarType>& av, bool warp) {
+     }
+ 
+     // manually schedule a frame
+-    if (PMONITOR)
++    if (PMONITOR && !PMONITOR->inFullscreenMode())
+         g_pCompositor->scheduleFrameForMonitor(PMONITOR, Aquamarine::IOutput::AQ_SCHEDULE_ANIMATION);
+ }
+ 
+diff --git a/src/managers/input/InputManager.cpp b/src/managers/input/InputManager.cpp
+index 7272e1cf66a..054677fa722 100644
+--- a/src/managers/input/InputManager.cpp
++++ b/src/managers/input/InputManager.cpp
+@@ -130,16 +130,10 @@ void CInputManager::onMouseMoved(IPointer::SMotionEvent e) {
+ 
+     const auto DELTA = *PNOACCEL == 1 ? unaccel : delta;
+ 
+-    if (g_pSeatManager->m_isPointerFrameSkipped)
+-        g_pPointerManager->storeMovement(e.timeMs, DELTA, unaccel);
+-    else
+-        g_pPointerManager->setStoredMovement(e.timeMs, DELTA, unaccel);
+-
+-    PROTO::relativePointer->sendRelativeMotion(sc<uint64_t>(e.timeMs) * 1000, DELTA, unaccel);
+-
+     if (e.mouse)
+         recheckMouseWarpOnMouseInput();
+ 
++    PROTO::relativePointer->sendRelativeMotion(sc<uint64_t>(e.timeMs) * 1000, delta, unaccel);
+     g_pPointerManager->move(DELTA);
+ 
+     mouseMoveUnified(e.timeMs, false, e.mouse);
+@@ -151,6 +145,8 @@ void CInputManager::onMouseMoved(IPointer::SMotionEvent e) {
+ 
+     if (e.mouse)
+         m_lastMousePos = getMouseCoordsInternal();
++
++    g_pSeatManager->sendPointerFrame();
+ }
+ 
+ void CInputManager::onMouseWarp(IPointer::SMotionAbsoluteEvent e) {
+@@ -676,6 +672,8 @@ void CInputManager::onMouseButton(IPointer::SButtonEvent e) {
+         m_focusHeldByButtons   = false;
+         m_refocusHeldByButtons = false;
+     }
++
++    g_pSeatManager->sendPointerFrame();
+ }
+ 
+ void CInputManager::processMouseRequest(const CSeatManager::SSetCursorEvent& event) {
+@@ -954,6 +952,7 @@ void CInputManager::onMouseWheel(IPointer::SAxisEvent e, SP<IPointer> pointer) {
+     int32_t deltaDiscrete = std::abs(discrete) != 0 && std::abs(discrete) < 1 ? std::copysign(1, discrete) : std::round(discrete);
+ 
+     g_pSeatManager->sendPointerAxis(e.timeMs, e.axis, delta, deltaDiscrete, value120, e.source, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
++    g_pSeatManager->sendPointerFrame();
+ }
+ 
+ Vector2D CInputManager::getMouseCoordsInternal() {
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 9ec59b73478..a51acc764b8 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -1914,22 +1914,33 @@ void CHyprRenderer::damageSurface(SP<CWLSurfaceResource> pSurface, double x, dou
+     if (g_pCompositor->m_unsafeState)
+         return;
+ 
+-    const auto WLSURF    = Desktop::View::CWLSurface::fromResource(pSurface);
+-    CRegion    damageBox = WLSURF ? WLSURF->computeDamage() : CRegion{};
++    const auto WLSURF = Desktop::View::CWLSurface::fromResource(pSurface);
+     if (!WLSURF) {
+         Log::logger->log(Log::ERR, "BUG THIS: No CWLSurface for surface in damageSurface!!!");
+         return;
+     }
+ 
+-    if (scale != 1.0)
+-        damageBox.scale(scale);
++    // hack: schedule frame events
++    if (!WLSURF->resource()->m_current.callbacks.empty() && pSurface->m_hlSurface) {
++        const auto BOX = pSurface->m_hlSurface->getSurfaceBoxGlobal();
++        if (BOX && !BOX->empty()) {
++            for (auto const& m : g_pCompositor->m_monitors) {
++                if (!m->m_output)
++                    continue;
+ 
+-    // schedule frame events
+-    g_pCompositor->scheduleFrameForMonitor(g_pCompositor->getMonitorFromVector(Vector2D(x, y)), Aquamarine::IOutput::AQ_SCHEDULE_DAMAGE);
++                if (BOX->overlaps(m->logicalBox()))
++                    g_pCompositor->scheduleFrameForMonitor(m, Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
++            }
++        }
++    }
+ 
++    CRegion damageBox = WLSURF->computeDamage();
+     if (damageBox.empty())
+         return;
+ 
++    if (scale != 1.0)
++        damageBox.scale(scale);
++
+     damageBox.translate({x, y});
+ 
+     CRegion damageBoxForEach;
+@@ -2049,7 +2060,7 @@ void CHyprRenderer::renderDragIcon(PHLMONITOR pMonitor, const Time::steady_tp& t
+ }
+ 
+ void CHyprRenderer::setCursorSurface(SP<Desktop::View::CWLSurface> surf, int hotspotX, int hotspotY, bool force) {
+-    m_cursorHasSurface = surf;
++    m_cursorHasSurface = surf && surf->resource();
+ 
+     m_lastCursorData.name     = "";
+     m_lastCursorData.surf     = surf;
+@@ -2140,30 +2151,19 @@ void CHyprRenderer::ensureCursorRenderingMode() {
+     if (HIDE == m_cursorHidden)
+         return;
+ 
+-    if (HIDE) {
++    if (HIDE)
+         Log::logger->log(Log::DEBUG, "Hiding the cursor (hl-mandated)");
+-
+-        for (auto const& m : g_pCompositor->m_monitors) {
+-            if (!g_pPointerManager->softwareLockedFor(m))
+-                continue;
+-
+-            damageMonitor(m); // TODO: maybe just damage the cursor area?
+-        }
+-
+-        setCursorHidden(true);
+-
+-    } else {
++    else
+         Log::logger->log(Log::DEBUG, "Showing the cursor (hl-mandated)");
+ 
+-        for (auto const& m : g_pCompositor->m_monitors) {
+-            if (!g_pPointerManager->softwareLockedFor(m))
+-                continue;
+-
+-            damageMonitor(m); // TODO: maybe just damage the cursor area?
+-        }
++    for (auto const& m : g_pCompositor->m_monitors) {
++        if (!g_pPointerManager->softwareLockedFor(m))
++            continue;
+ 
+-        setCursorHidden(false);
++        g_pPointerManager->damageCursor(m, m->shouldSkipScheduleFrameOnMouseEvent());
+     }
++
++    setCursorHidden(HIDE);
+ }
+ 
+ void CHyprRenderer::setCursorHidden(bool hide) {
+diff --git a/src/render/decorations/CHyprBorderDecoration.cpp b/src/render/decorations/CHyprBorderDecoration.cpp
+index a082f0738fe..eba4d76e0cd 100644
+--- a/src/render/decorations/CHyprBorderDecoration.cpp
++++ b/src/render/decorations/CHyprBorderDecoration.cpp
+@@ -115,7 +115,7 @@ void CHyprBorderDecoration::updateWindow(PHLWINDOW) {
+ }
+ 
+ void CHyprBorderDecoration::damageEntire() {
+-    if (!validMapped(m_window))
++    if (!validMapped(m_window) || m_window->isFullscreen())
+         return;
+ 
+     auto       surfaceBox   = m_window->getWindowMainSurfaceBox();

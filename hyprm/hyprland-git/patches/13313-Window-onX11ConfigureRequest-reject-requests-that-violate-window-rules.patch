@@ -1,0 +1,48 @@
+diff --git a/src/desktop/view/Window.cpp b/src/desktop/view/Window.cpp
+index 5660cda6a55..76f6aa4e725 100644
+--- a/src/desktop/view/Window.cpp
++++ b/src/desktop/view/Window.cpp
+@@ -1201,7 +1201,7 @@ void CWindow::onX11ConfigureRequest(CBox box) {
+ 
+     g_pHyprRenderer->damageWindow(m_self.lock());
+ 
+-    if (!m_isFloating || isFullscreen() || g_layoutManager->dragController()->target() == m_self) {
++    if (!m_isFloating || isFullscreen() || g_layoutManager->dragController()->target() == m_self || (m_suppressedEvents & Desktop::View::SUPPRESS_X11_CONFIGURE_REQUEST)) {
+         sendWindowSize(true);
+         g_pInputManager->refocus();
+         g_pHyprRenderer->damageWindow(m_self.lock());
+@@ -1795,7 +1795,9 @@ void CWindow::mapWindow() {
+                 else if (var == "activatefocus")
+                     m_suppressedEvents |= Desktop::View::SUPPRESS_ACTIVATE_FOCUSONLY;
+                 else if (var == "fullscreenoutput")
+-                    m_suppressedEvents |= Desktop::View::SUPPRESS_FULLSCREEN_OUTPUT;
++                    m_suppressedEvents |= Desktop::View::SUPPRESS_X11_CONFIGURE_REQUEST;
++                else if (var == "x11configurerequest")
++                    m_suppressedEvents |= Desktop::View::SUPPRESS_X11_CONFIGURE_REQUEST;
+                 else
+                     Log::logger->log(Log::ERR, "Error while parsing suppressevent windowrule: unknown event type {}", var);
+             }
+diff --git a/src/desktop/view/Window.hpp b/src/desktop/view/Window.hpp
+index d689ae3f948..00b082a6700 100644
+--- a/src/desktop/view/Window.hpp
++++ b/src/desktop/view/Window.hpp
+@@ -65,12 +65,13 @@ namespace Desktop::View {
+     };
+ 
+     enum eSuppressEvents : uint8_t {
+-        SUPPRESS_NONE               = 0,
+-        SUPPRESS_FULLSCREEN         = 1 << 0,
+-        SUPPRESS_MAXIMIZE           = 1 << 1,
+-        SUPPRESS_ACTIVATE           = 1 << 2,
+-        SUPPRESS_ACTIVATE_FOCUSONLY = 1 << 3,
+-        SUPPRESS_FULLSCREEN_OUTPUT  = 1 << 4,
++        SUPPRESS_NONE                  = 0,
++        SUPPRESS_FULLSCREEN            = 1 << 0,
++        SUPPRESS_MAXIMIZE              = 1 << 1,
++        SUPPRESS_ACTIVATE              = 1 << 2,
++        SUPPRESS_ACTIVATE_FOCUSONLY    = 1 << 3,
++        SUPPRESS_FULLSCREEN_OUTPUT     = 1 << 4,
++        SUPPRESS_X11_CONFIGURE_REQUEST = 1 << 5,
+     };
+ 
+     struct SWindowActiveEvent {

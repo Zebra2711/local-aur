@@ -1,0 +1,211 @@
+diff --git a/hyprtester/src/tests/main/dwindle.cpp b/hyprtester/src/tests/main/dwindle.cpp
+index 234bfc331..b4cac53f9 100644
+--- a/hyprtester/src/tests/main/dwindle.cpp
++++ b/hyprtester/src/tests/main/dwindle.cpp
+@@ -227,6 +227,28 @@ static void testRotatesplit() {
+     OK(getFromSocket("/reload"));
+ }
+ 
++static void testForceSplitOnMoveToWorkspace() {
++    OK(getFromSocket("/dispatch workspace 2"));
++    EXPECT(!!Tests::spawnKitty("kitty"), true);
++
++    OK(getFromSocket("/dispatch workspace 1"));
++    EXPECT(!!Tests::spawnKitty("kitty"), true);
++    std::string posBefore = Tests::getWindowAttribute(getFromSocket("/activewindow"), "at:");
++
++    OK(getFromSocket("/keyword dwindle:force_split 2"));
++    OK(getFromSocket("/dispatch movecursortocorner 3")); // top left
++    OK(getFromSocket("/dispatch movetoworkspace 2"));
++
++    // Should be moved to the right, so the position should change
++    std::string activeWindow = getFromSocket("/activewindow");
++    EXPECT(activeWindow.contains(posBefore), false);
++
++    // clean up
++    OK(getFromSocket("/reload"));
++    Tests::killAllWindows();
++    Tests::waitUntilWindowsN(0);
++}
++
+ static bool test() {
+     NLog::log("{}Testing Dwindle layout", Colors::GREEN);
+ 
+@@ -243,6 +265,9 @@ static bool test() {
+     NLog::log("{}Testing rotatesplit", Colors::GREEN);
+     testRotatesplit();
+ 
++    NLog::log("{}Testing force_split on move to workspace", Colors::GREEN);
++    testForceSplitOnMoveToWorkspace();
++
+     // clean up
+     NLog::log("Cleaning up", Colors::YELLOW);
+     getFromSocket("/dispatch workspace 1");
+diff --git a/hyprtester/src/tests/main/window.cpp b/hyprtester/src/tests/main/window.cpp
+index beac02988..a5033310e 100644
+--- a/hyprtester/src/tests/main/window.cpp
++++ b/hyprtester/src/tests/main/window.cpp
+@@ -47,17 +47,6 @@ static std::string spawnKittyActivating(const std::string& class_ = "kitty_activ
+     return tmpFilename;
+ }
+ 
+-static std::string getWindowAttribute(const std::string& winInfo, const std::string& attr) {
+-    auto pos = winInfo.find(attr);
+-    if (pos == std::string::npos) {
+-        NLog::log("{}Wrong window attribute", Colors::RED);
+-        ret = 1;
+-        return "Wrong window attribute";
+-    }
+-    auto pos2 = winInfo.find('\n', pos);
+-    return winInfo.substr(pos, pos2 - pos);
+-}
+-
+ static std::string getWindowAddress(const std::string& winInfo) {
+     auto pos  = winInfo.find("Window ");
+     auto pos2 = winInfo.find(" -> ");
+@@ -92,7 +81,7 @@ static void testSwapWindow() {
+     // Test swapwindow by direction
+     {
+         getFromSocket("/dispatch focuswindow class:kitty_A");
+-        auto pos = getWindowAttribute(getFromSocket("/activewindow"), "at:");
++        auto pos = Tests::getWindowAttribute(getFromSocket("/activewindow"), "at:");
+         NLog::log("{}Testing kitty_A {}, swapwindow with direction 'r'", Colors::YELLOW, pos);
+ 
+         OK(getFromSocket("/dispatch swapwindow r"));
+@@ -104,7 +93,7 @@ static void testSwapWindow() {
+     // Test swapwindow by class
+     {
+         getFromSocket("/dispatch focuswindow class:kitty_A");
+-        auto pos = getWindowAttribute(getFromSocket("/activewindow"), "at:");
++        auto pos = Tests::getWindowAttribute(getFromSocket("/activewindow"), "at:");
+         NLog::log("{}Testing kitty_A {}, swapwindow with class:kitty_B", Colors::YELLOW, pos);
+ 
+         OK(getFromSocket("/dispatch swapwindow class:kitty_B"));
+@@ -118,7 +107,7 @@ static void testSwapWindow() {
+         getFromSocket("/dispatch focuswindow class:kitty_B");
+         auto addr = getWindowAddress(getFromSocket("/activewindow"));
+         getFromSocket("/dispatch focuswindow class:kitty_A");
+-        auto pos = getWindowAttribute(getFromSocket("/activewindow"), "at:");
++        auto pos = Tests::getWindowAttribute(getFromSocket("/activewindow"), "at:");
+         NLog::log("{}Testing kitty_A {}, swapwindow with address:0x{}(kitty_B)", Colors::YELLOW, pos, addr);
+ 
+         OK(getFromSocket(std::format("/dispatch swapwindow address:0x{}", addr)));
+@@ -141,7 +130,7 @@ static void testSwapWindow() {
+     {
+         getFromSocket("/dispatch focuswindow class:kitty_B");
+         auto addr = getWindowAddress(getFromSocket("/activewindow"));
+-        auto ws   = getWindowAttribute(getFromSocket("/activewindow"), "workspace:");
++        auto ws   = Tests::getWindowAttribute(getFromSocket("/activewindow"), "workspace:");
+         NLog::log("{}Sending address:0x{}(kitty_B) to workspace \"swapwindow2\"", Colors::YELLOW, addr);
+ 
+         OK(getFromSocket("/dispatch movetoworkspacesilent name:swapwindow2"));
+@@ -222,8 +211,8 @@ static void testGroupRules() {
+ 
+ static bool isActiveWindow(const std::string& class_, char fullscreen = '0', bool log = true) {
+     std::string activeWin     = getFromSocket("/activewindow");
+-    auto        winClass      = getWindowAttribute(activeWin, "class:");
+-    auto        winFullscreen = getWindowAttribute(activeWin, "fullscreen:").back();
++    auto        winClass      = Tests::getWindowAttribute(activeWin, "class:");
++    auto        winFullscreen = Tests::getWindowAttribute(activeWin, "fullscreen:").back();
+     if (winClass.substr(strlen("class: ")) == class_ && winFullscreen == fullscreen)
+         return true;
+     else {
+diff --git a/hyprtester/src/tests/shared.cpp b/hyprtester/src/tests/shared.cpp
+index f6e2fce91..32824f3b6 100644
+--- a/hyprtester/src/tests/shared.cpp
++++ b/hyprtester/src/tests/shared.cpp
+@@ -181,3 +181,13 @@ bool Tests::writeFile(const std::string& name, const std::string& contents) {
+ 
+     return true;
+ }
++
++std::string Tests::getWindowAttribute(const std::string& winInfo, const std::string& attr) {
++    auto pos = winInfo.find(attr);
++    if (pos == std::string::npos) {
++        NLog::log("{}Window attribute not found: '{}'", Colors::RED, attr);
++        return "Wrong window attribute";
++    }
++    auto pos2 = winInfo.find('\n', pos);
++    return winInfo.substr(pos, pos2 - pos);
++}
+diff --git a/hyprtester/src/tests/shared.hpp b/hyprtester/src/tests/shared.hpp
+index bf875f8b0..95058e040 100644
+--- a/hyprtester/src/tests/shared.hpp
++++ b/hyprtester/src/tests/shared.hpp
+@@ -19,4 +19,5 @@ namespace Tests {
+     bool                                                       killAllLayers();
+     std::string                                                execAndGet(const std::string& cmd);
+     bool                                                       writeFile(const std::string& name, const std::string& contents);
++    std::string                                                getWindowAttribute(const std::string& winInfo, const std::string& attr);
+ };
+diff --git a/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.cpp b/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.cpp
+index 7ef367538..4cd79aeca 100644
+--- a/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.cpp
++++ b/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.cpp
+@@ -71,7 +71,7 @@ void CDwindleAlgorithm::newTarget(SP<ITarget> target) {
+     addTarget(target);
+ }
+ 
+-void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
++void CDwindleAlgorithm::addTarget(SP<ITarget> target) {
+     const auto WORK_AREA = m_parent->space()->workArea();
+ 
+     const auto PNODE = m_dwindleNodesData.emplace_back(makeShared<SDwindleNodeData>());
+@@ -215,7 +215,7 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
+                 NEWPARENT->children[1] = OPENINGON;
+             }
+         }
+-    } else if (*PFORCESPLIT == 0 || !newTarget) {
++    } else if (*PFORCESPLIT == 0 || m_overrideFocalPoint) {
+         if ((SIDEBYSIDE && MOUSECOORDS.x < NEWPARENT->box.x + (NEWPARENT->box.w / 2.F)) || (!SIDEBYSIDE && MOUSECOORDS.y < NEWPARENT->box.y + (NEWPARENT->box.h / 2.F))) {
+             // we are hovering over the first node, make PNODE first.
+             NEWPARENT->children[1] = OPENINGON;
+@@ -225,14 +225,12 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
+             NEWPARENT->children[0] = OPENINGON;
+             NEWPARENT->children[1] = PNODE;
+         }
++    } else if (*PFORCESPLIT == 1) {
++        NEWPARENT->children[1] = OPENINGON;
++        NEWPARENT->children[0] = PNODE;
+     } else {
+-        if (*PFORCESPLIT == 1) {
+-            NEWPARENT->children[1] = OPENINGON;
+-            NEWPARENT->children[0] = PNODE;
+-        } else {
+-            NEWPARENT->children[0] = OPENINGON;
+-            NEWPARENT->children[1] = PNODE;
+-        }
++        NEWPARENT->children[0] = OPENINGON;
++        NEWPARENT->children[1] = PNODE;
+     }
+ 
+     // split in favor of a specific window
+@@ -268,7 +266,7 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target, bool newTarget) {
+ 
+ void CDwindleAlgorithm::movedTarget(SP<ITarget> target, std::optional<Vector2D> focalPoint) {
+     m_overrideFocalPoint = focalPoint;
+-    addTarget(target, false);
++    addTarget(target);
+     m_overrideFocalPoint.reset();
+ }
+ 
+diff --git a/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.hpp b/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.hpp
+index 41cbf8bbd..043f87384 100644
+--- a/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.hpp
++++ b/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.hpp
+@@ -39,7 +39,7 @@ namespace Layout::Tiled {
+ 
+         std::optional<Vector2D> m_overrideFocalPoint; // for onWindowCreatedTiling.
+ 
+-        void                    addTarget(SP<ITarget> target, bool newTarget = true);
++        void                    addTarget(SP<ITarget> target);
+         void                    calculateWorkspace();
+         SP<SDwindleNodeData>    getNodeFromTarget(SP<ITarget>);
+         SP<SDwindleNodeData>    getNodeFromWindow(PHLWINDOW w);
+@@ -55,4 +55,4 @@ namespace Layout::Tiled {
+ 
+         Math::eDirection        m_overrideDirection = Math::DIRECTION_DEFAULT;
+     };
+-};
+\ No newline at end of file
++};

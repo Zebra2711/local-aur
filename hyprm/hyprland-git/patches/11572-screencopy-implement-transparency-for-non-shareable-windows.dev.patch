@@ -1,0 +1,271 @@
+diff --git a/src/config/ConfigDescriptions.hpp b/src/config/ConfigDescriptions.hpp
+index f5bd1b2f..f45aa2e1 100644
+--- a/src/config/ConfigDescriptions.hpp
++++ b/src/config/ConfigDescriptions.hpp
+@@ -1357,6 +1357,12 @@ inline static const std::vector<SConfigOptionDescription> CONFIG_OPTIONS = {
+         .type        = CONFIG_OPTION_BOOL,
+         .data        = SConfigOptionDescription::SBoolData{true},
+     },
++    SConfigOptionDescription{
++        .value       = "misc:noscreenshare_blackout",
++        .description = "controls how surfaces marked noscreenshare appear in screencopy",
++        .type        = CONFIG_OPTION_INT,
++        .data        = SConfigOptionDescription::SBoolData{true},
++    },
+     SConfigOptionDescription{
+         .value       = "misc:disable_scale_notification",
+         .description = "disables notification popup when a monitor fails to set a suitable scale and falls back to suggested",
+diff --git a/src/config/ConfigManager.cpp b/src/config/ConfigManager.cpp
+index 3e0a9957..32397498 100644
+--- a/src/config/ConfigManager.cpp
++++ b/src/config/ConfigManager.cpp
+@@ -518,6 +518,7 @@ CConfigManager::CConfigManager() {
+     registerConfigVar("misc:enable_anr_dialog", Hyprlang::INT{1});
+     registerConfigVar("misc:anr_missed_pings", Hyprlang::INT{5});
+     registerConfigVar("misc:screencopy_force_8b", Hyprlang::INT{1});
++    registerConfigVar("misc:noscreenshare_blackout", Hyprlang::INT{1});
+     registerConfigVar("misc:disable_scale_notification", Hyprlang::INT{0});
+     registerConfigVar("misc:size_limits_tiled", Hyprlang::INT{0});
+ 
+@@ -3036,8 +3037,10 @@ std::optional<std::string> CConfigManager::handleWindowrule(const std::string& c
+     }
+ 
+     m_keywordRules.emplace_back(std::move(rule));
+-    if (g_pHyprCtl && g_pHyprCtl->m_currentRequestParams.isDynamicKeyword)
++    if (g_pHyprCtl && g_pHyprCtl->m_currentRequestParams.isDynamicKeyword) {
+         Desktop::Rule::ruleEngine()->registerRule(SP<Desktop::Rule::IRule>{m_keywordRules.back()});
++        Desktop::Rule::ruleEngine()->updateAllRules();
++    }
+ 
+     return std::nullopt;
+ }
+@@ -3076,6 +3079,11 @@ std::optional<std::string> CConfigManager::handleLayerrule(const std::string& co
+ 
+     m_keywordRules.emplace_back(std::move(rule));
+ 
++    if (g_pHyprCtl && g_pHyprCtl->m_currentRequestParams.isDynamicKeyword) {
++        Desktop::Rule::ruleEngine()->registerRule(SP<Desktop::Rule::IRule>{m_keywordRules.back()});
++        Desktop::Rule::ruleEngine()->updateAllRules();
++    }
++
+     return std::nullopt;
+ }
+ 
+diff --git a/src/managers/screenshare/ScreenshareManager.cpp b/src/managers/screenshare/ScreenshareManager.cpp
+index 63f2bbbc..5fdb3aaf 100644
+--- a/src/managers/screenshare/ScreenshareManager.cpp
++++ b/src/managers/screenshare/ScreenshareManager.cpp
+@@ -15,6 +15,8 @@ void CScreenshareManager::onOutputCommit(PHLMONITOR monitor) {
+ 
+     // if no pending frames, and no sessions are sharing, then unblock ds
+     if (m_pendingFrames.empty()) {
++        g_pHyprRenderer->setScreencopyPendingForMonitor(monitor, false);
++
+         for (const auto& session : m_sessions) {
+             if (!session->m_stopped && session->m_sharing)
+                 return;
+@@ -41,6 +43,28 @@ void CScreenshareManager::onOutputCommit(PHLMONITOR monitor) {
+     });
+ 
+     std::erase_if(m_pendingFrames, [&](const WP<CScreenshareFrame>& frame) { return frame.expired(); });
++
++    bool anyPendingForMonitor = false;
++    for (const auto& frameRef : m_pendingFrames) {
++        const auto frame = frameRef.lock();
++        if (!frame || !frame->m_shared || frame->done())
++            continue;
++
++        const auto frameMonitor = frame->m_session->monitor();
++        if (!frameMonitor || frameMonitor != monitor)
++            continue;
++
++        if (frame->m_session->m_type == SHARE_WINDOW) {
++            const CBox geometry = {frame->m_session->m_window->m_realPosition->value(), frame->m_session->m_window->m_realSize->value()};
++            if (geometry.intersection({monitor->m_position, monitor->m_size}).empty())
++                continue;
++        }
++
++        anyPendingForMonitor = true;
++        break;
++    }
++
++    g_pHyprRenderer->setScreencopyPendingForMonitor(monitor, anyPendingForMonitor);
+ }
+ 
+ UP<CScreenshareSession> CScreenshareManager::newSession(wl_client* client, PHLMONITOR monitor) {
+diff --git a/src/render/Shader.cpp b/src/render/Shader.cpp
+index ead841a5..4db71c24 100644
+--- a/src/render/Shader.cpp
++++ b/src/render/Shader.cpp
+@@ -147,6 +147,7 @@ void CShader::getUniformLocations() {
+     m_uniformLocations[SHADER_UV_SIZE]             = getUniform("uvSize");
+     m_uniformLocations[SHADER_UV_OFFSET]           = getUniform("uvOffset");
+     m_uniformLocations[SHADER_ALPHA]               = getUniform("alpha");
++    m_uniformLocations[SHADER_CAPTURE]             = getUniform("capture");
+     m_uniformLocations[SHADER_POS_ATTRIB]          = getAttrib("pos");
+     m_uniformLocations[SHADER_TEX_ATTRIB]          = getAttrib("texcoord");
+     m_uniformLocations[SHADER_MATTE_TEX_ATTRIB]    = getAttrib("texcoordMatte");
+diff --git a/src/render/Shader.hpp b/src/render/Shader.hpp
+index 9b097c44..100e22a2 100644
+--- a/src/render/Shader.hpp
++++ b/src/render/Shader.hpp
+@@ -23,6 +23,7 @@ enum eShaderUniform : uint8_t {
+     SHADER_CONVERT_MATRIX,
+     SHADER_TEX,
+     SHADER_ALPHA,
++    SHADER_CAPTURE,
+     SHADER_POS_ATTRIB,
+     SHADER_TEX_ATTRIB,
+     SHADER_MATTE_TEX_ATTRIB,
+diff --git a/src/render/pass/BorderPassElement.hpp b/src/render/pass/BorderPassElement.hpp
+index 6513b74a..b40d3274 100644
+--- a/src/render/pass/BorderPassElement.hpp
++++ b/src/render/pass/BorderPassElement.hpp
+@@ -14,6 +14,7 @@ class CBorderPassElement : public IPassElement {
+         int                round = 0, borderSize = 1, outerRound = -1;
+         float              roundingPower = 2.F;
+         PHLWINDOWREF       window;
++        PHLWINDOWREF       pWindow;
+     };
+ 
+     CBorderPassElement(const SBorderData& data_);
+diff --git a/src/render/pass/Pass.cpp b/src/render/pass/Pass.cpp
+index b7923a66..768cc4e0 100644
+--- a/src/render/pass/Pass.cpp
++++ b/src/render/pass/Pass.cpp
+@@ -10,6 +10,7 @@
+ #include "../../render/Renderer.hpp"
+ #include "../../desktop/state/FocusState.hpp"
+ #include "../../protocols/core/Compositor.hpp"
++#include "SurfacePassElement.hpp"
+ 
+ bool CRenderPass::empty() const {
+     return false;
+@@ -95,9 +96,26 @@ void CRenderPass::simplify() {
+                     opaque.subtract(infringement);
+                 }
+             }
+-            newDamage.subtract(opaque);
+-            if (*PDEBUGPASS)
+-                m_occludedRegions.emplace_back(opaque);
++
++            auto surf = dynamic_cast<CSurfacePassElement*>(el->element.get());
++
++            // do not occlude noscreenshare surfaces when blackout is active
++            bool skipOcclusion = false;
++            if (surf) {
++                const bool captureActive   = g_pHyprOpenGL->captureMRTActiveForCurrentMonitor();
++                const bool transparentMode = captureActive && !CHyprRenderer::shouldBlackoutNoScreenShare();
++                const bool noShareWindow   = surf->m_data.pWindow && surf->m_data.pWindow->m_ruleApplicator->noScreenShare().valueOrDefault();
++                const bool noShareLayer    = surf->m_data.pLS && surf->m_data.pLS->m_ruleApplicator->noScreenShare().valueOrDefault();
++
++                if (transparentMode && (noShareWindow || noShareLayer))
++                    skipOcclusion = true;
++            }
++
++            if (!skipOcclusion) {
++                newDamage.subtract(opaque);
++                if (*PDEBUGPASS)
++                    m_occludedRegions.emplace_back(opaque);
++            }
+         }
+     }
+ 
+diff --git a/src/render/pass/TexPassElement.hpp b/src/render/pass/TexPassElement.hpp
+index 5b8c9757..4336eb71 100644
+--- a/src/render/pass/TexPassElement.hpp
++++ b/src/render/pass/TexPassElement.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include "PassElement.hpp"
++#include <array>
+ #include <optional>
+ 
+ class CWLSurfaceResource;
+@@ -30,18 +31,17 @@ class CTexPassElement : public IPassElement {
+         std::optional<bool>    blockBlurOptimization;
+         bool                   cmBackToSRGB = false;
+         SP<CMonitor>           cmBackToSRGBSource;
+-
+         bool                   discardActive = false;
+         bool                   allowCustomUV = false;
+         SP<CWLSurfaceResource> surface       = nullptr;
+-
+         uint32_t               discardMode    = DISCARD_OPAQUE;
+         float                  discardOpacity = 0.f;
+-
+         CRegion                clipRegion;
+         PHLLSREF               currentLS;
+-
+         SP<ITexture>           blurredBG;
++        bool                                captureWrites   = true;
++        bool                                captureBlackout = false;
++        std::optional<std::array<float, 4>> captureMaskColor;
+     };
+ 
+     CTexPassElement(const SRenderData& data);
+diff --git a/src/render/shaders/glsl/capture.glsl b/src/render/shaders/glsl/capture.glsl
+new file mode 100644
+index 00000000..6e62e780
+--- /dev/null
++++ b/src/render/shaders/glsl/capture.glsl
+@@ -0,0 +1,8 @@
++#ifdef HYPR_USE_CAPTURE_ATTACHMENT
++layout(location = 1) out vec4 fragColorCapture;
++uniform int capture;
++
++#define CAPTURE_WRITE(v) fragColorCapture = mix((v), vec4(0.0, 0.0, 0.0, (v).a), float(capture))
++#else
++#define CAPTURE_WRITE(v)
++#endif
+diff --git a/src/render/shaders/glsl/ext.frag b/src/render/shaders/glsl/ext.frag
+index 1c614bd3..608e7b72 100644
+--- a/src/render/shaders/glsl/ext.frag
++++ b/src/render/shaders/glsl/ext.frag
+@@ -14,6 +14,7 @@ uniform float              roundingPower;
+ uniform vec2               topLeft;
+ uniform vec2               fullSize;
+ #include "rounding.glsl"
++#include "capture.glsl"
+ 
+ uniform int  discardOpaque;
+ uniform int  discardAlpha;
+@@ -39,5 +40,7 @@ void main() {
+     if (radius > 0.0)
+         pixColor = rounding(pixColor, radius, roundingPower, topLeft, fullSize);
+ 
+-    fragColor = pixColor * alpha;
++    vec4 outColor = pixColor * alpha;
++    fragColor     = outColor;
++    CAPTURE_WRITE(outColor);
+ }
+diff --git a/src/render/shaders/glsl/passthru.frag b/src/render/shaders/glsl/passthru.frag
+index e33b7121..219fc19a 100644
+--- a/src/render/shaders/glsl/passthru.frag
++++ b/src/render/shaders/glsl/passthru.frag
+@@ -4,7 +4,10 @@ precision highp float;
+ in vec2 v_texcoord; // is in 0-1
+ uniform sampler2D tex;
+ 
++#include "capture.glsl"
++
+ layout(location = 0) out vec4 fragColor;
+ void main() {
+     fragColor = texture(tex, v_texcoord);
++    CAPTURE_WRITE(fragColor);
+ }
+diff --git a/src/render/shaders/glsl/rgbamatte.frag b/src/render/shaders/glsl/rgbamatte.frag
+index a7213cfe..292ae913 100644
+--- a/src/render/shaders/glsl/rgbamatte.frag
++++ b/src/render/shaders/glsl/rgbamatte.frag
+@@ -5,7 +5,10 @@ in vec2 v_texcoord; // is in 0-1
+ uniform sampler2D tex;
+ uniform sampler2D texMatte;
+ 
++#include "capture.glsl"
++
+ layout(location = 0) out vec4 fragColor;
+ void main() {
+     fragColor = texture(tex, v_texcoord) * texture(texMatte, v_texcoord)[0]; // I know it only uses R, but matte should be black/white anyways.
++    CAPTURE_WRITE(fragColor);
+ }

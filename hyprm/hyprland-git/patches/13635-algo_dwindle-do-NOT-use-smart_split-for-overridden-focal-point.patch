@@ -1,0 +1,38 @@
+diff --git a/hyprtester/src/tests/main/dwindle.cpp b/hyprtester/src/tests/main/dwindle.cpp
+index b4cac53f9..9513db677 100644
+--- a/hyprtester/src/tests/main/dwindle.cpp
++++ b/hyprtester/src/tests/main/dwindle.cpp
+@@ -64,16 +64,16 @@ static void test13349() {
+ 
+     {
+         auto str = getFromSocket("/activewindow");
+-        EXPECT_CONTAINS(str, "at: 497,22");
+-        EXPECT_CONTAINS(str, "size: 456,1036");
++        EXPECT_CONTAINS(str, "at: 22,547");
++        EXPECT_CONTAINS(str, "size: 931,511");
+     }
+ 
+     OK(getFromSocket("/dispatch movewindow r"));
+ 
+     {
+         auto str = getFromSocket("/activewindow");
+-        EXPECT_CONTAINS(str, "at: 967,22");
+-        EXPECT_CONTAINS(str, "size: 456,1036");
++        EXPECT_CONTAINS(str, "at: 967,547");
++        EXPECT_CONTAINS(str, "size: 931,511");
+     }
+ 
+     // clean up
+diff --git a/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.cpp b/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.cpp
+index 4cd79aeca..531b54d87 100644
+--- a/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.cpp
++++ b/src/layout/algorithm/tiled/dwindle/DwindleAlgorithm.cpp
+@@ -184,7 +184,7 @@ void CDwindleAlgorithm::addTarget(SP<ITarget> target) {
+         // whether or not the override persists after opening one window
+         if (*PERMANENTDIRECTIONOVERRIDE == 0)
+             m_overrideDirection = Math::DIRECTION_DEFAULT;
+-    } else if (*PSMARTSPLIT == 1 || m_overrideFocalPoint) {
++    } else if (*PSMARTSPLIT == 1) {
+         const auto PARENT_CENTER      = NEWPARENT->box.pos() + NEWPARENT->box.size() / 2;
+         const auto PARENT_PROPORTIONS = NEWPARENT->box.h / NEWPARENT->box.w;
+         const auto DELTA              = MOUSECOORDS - PARENT_CENTER;

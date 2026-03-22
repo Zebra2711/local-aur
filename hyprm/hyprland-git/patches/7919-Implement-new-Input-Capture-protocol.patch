@@ -1,0 +1,1352 @@
+diff --git a/.github/actions/setup_base/action.yml b/.github/actions/setup_base/action.yml
+index d7b52a791..10081787d 100644
+--- a/.github/actions/setup_base/action.yml
++++ b/.github/actions/setup_base/action.yml
+@@ -30,6 +30,7 @@ runs:
+           libc++ \
+           libdisplay-info \
+           libdrm \
++          libei \
+           libepoxy \
+           libfontenc \
+           libglvnd \
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 62405bf2c..b7899356c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -203,6 +203,7 @@ pkg_check_modules(
+   xcursor
+   libdrm
+   libinput>=1.28
++  libeis-1.0
+   gbm
+   gio-2.0
+   re2)
+@@ -377,7 +378,7 @@ endfunction()
+ 
+ target_link_libraries(Hyprland OpenGL::EGL OpenGL::GL Threads::Threads)
+ 
+-pkg_check_modules(hyprland_protocols_dep hyprland-protocols>=0.6.4)
++pkg_check_modules(hyprland_protocols_dep hyprland-protocols>=0.7.0)
+ if(hyprland_protocols_dep_FOUND)
+   pkg_get_variable(HYPRLAND_PROTOCOLS hyprland-protocols pkgdatadir)
+   message(STATUS "hyprland-protocols dependency set to ${HYPRLAND_PROTOCOLS}")
+@@ -451,6 +452,8 @@ protocolnew("staging/ext-workspace" "ext-workspace-v1" false)
+ protocolnew("staging/ext-data-control" "ext-data-control-v1" false)
+ protocolnew("staging/pointer-warp" "pointer-warp-v1" false)
+ 
++protocolnew("subprojects/hyprland-protocols/protocols" "hyprland-input-capture-v1"
++            true)
+ protocolwayland()
+ 
+ # tools
+diff --git a/nix/default.nix b/nix/default.nix
+index a9d5c2d67..3b9627fe6 100644
+--- a/nix/default.nix
++++ b/nix/default.nix
+@@ -21,6 +21,7 @@
+   hyprwayland-scanner,
+   libGL,
+   libdrm,
++  libei,
+   libexecinfo,
+   libinput,
+   libxkbcommon,
+@@ -140,6 +141,7 @@ in
+           hyprutils
+           libdrm
+           libGL
++          libei
+           libinput
+           libuuid
+           libxkbcommon
+diff --git a/protocols/meson.build b/protocols/meson.build
+index dc23eaa17..3a52ee4c0 100644
+--- a/protocols/meson.build
++++ b/protocols/meson.build
+@@ -7,7 +7,7 @@ wayland_protos = dependency(
+ 
+ hyprland_protos = dependency(
+ 	'hyprland-protocols',
+-	version: '>=0.6.4',
++	version: '>=0.7.0',
+ 	fallback: 'hyprland-protocols',
+ )
+ 
+@@ -42,6 +42,7 @@ protocols = [
+ 	hyprland_protocol_dir / 'protocols/hyprland-ctm-control-v1.xml',
+ 	hyprland_protocol_dir / 'protocols/hyprland-surface-v1.xml',
+ 	hyprland_protocol_dir / 'protocols/hyprland-lock-notify-v1.xml',
++	hyprland_protocol_dir / 'protocols/hyprland-input-capture-v1.xml',
+ 	wayland_protocol_dir / 'staging/tearing-control/tearing-control-v1.xml',
+ 	wayland_protocol_dir / 'staging/fractional-scale/fractional-scale-v1.xml',
+ 	wayland_protocol_dir / 'unstable/xdg-output/xdg-output-unstable-v1.xml',
+diff --git a/src/managers/KeybindManager.cpp b/src/managers/KeybindManager.cpp
+index d04d6ba71..8759cb17d 100644
+--- a/src/managers/KeybindManager.cpp
++++ b/src/managers/KeybindManager.cpp
+@@ -7,12 +7,14 @@
+ #include "../protocols/IdleNotify.hpp"
+ #include "../protocols/core/DataDevice.hpp"
+ #include "../render/decorations/CHyprGroupBarDecoration.hpp"
++#include "../devices/IKeyboard.hpp"
+ #include "KeybindManager.hpp"
+ #include "PointerManager.hpp"
+ #include "Compositor.hpp"
+ #include "TokenManager.hpp"
+ #include "eventLoop/EventLoopManager.hpp"
+ #include "debug/Log.hpp"
++#include "protocols/InputCapture.hpp"
+ #include "../managers/HookSystemManager.hpp"
+ #include "../managers/input/InputManager.hpp"
+ #include "../managers/animation/DesktopAnimationManager.hpp"
+@@ -145,6 +147,7 @@ CKeybindManager::CKeybindManager() {
+     m_dispatchers["global"]                         = global;
+     m_dispatchers["setprop"]                        = setProp;
+     m_dispatchers["forceidle"]                      = forceIdle;
++		m_dispatchers["releaseinputcapture"]            = releaseInputCapture;
+ 
+     m_scrollTimer.reset();
+ 
+@@ -785,6 +788,11 @@ SDispatchResult CKeybindManager::handleKeybinds(const uint32_t modmask, const SP
+ 
+             m_passPressed = sc<int>(pressed);
+ 
++            // We only process the releaseinputcapture dispatcher when input capture is active
++            if (PROTO::inputCapture->isCaptured() && k->handler != "releaseinputcapture") {
++                break;
++            }
++
+             // if the dispatchers says to pass event then we will
+             if (k->handler == "mouse")
+                 res = DISPATCHER->second((pressed ? "1" : "0") + k->arg);
+@@ -3313,3 +3321,8 @@ SDispatchResult CKeybindManager::sendkeystate(std::string args) {
+ 
+     return result;
+ }
++
++SDispatchResult CKeybindManager::releaseInputCapture(std::string args) {
++    PROTO::inputCapture->forceRelease();
++    return {};
++}
+diff --git a/src/managers/KeybindManager.hpp b/src/managers/KeybindManager.hpp
+index 592588b54..566fd1190 100644
+--- a/src/managers/KeybindManager.hpp
++++ b/src/managers/KeybindManager.hpp
+@@ -238,6 +238,7 @@ class CKeybindManager {
+     static SDispatchResult event(std::string);
+     static SDispatchResult setProp(std::string);
+     static SDispatchResult forceIdle(std::string);
++		static SDispatchResult releaseInputCapture(std::string);
+ 
+     friend class CCompositor;
+     friend class CInputManager;
+diff --git a/src/managers/PointerManager.cpp b/src/managers/PointerManager.cpp
+index aeabe4120..8d35b760d 100644
+--- a/src/managers/PointerManager.cpp
++++ b/src/managers/PointerManager.cpp
+@@ -16,6 +16,7 @@
+ #include "../render/OpenGL.hpp"
+ #include "SeatManager.hpp"
+ #include "../helpers/time/Time.hpp"
++#include "protocols/InputCapture.hpp"
+ #include <cstring>
+ #include <gbm.h>
+ #include <cairo/cairo.h>
+@@ -768,6 +769,12 @@ void CPointerManager::move(const Vector2D& deltaLogical) {
+     const auto oldPos = m_pointerPos;
+     auto       newPos = oldPos + Vector2D{std::isnan(deltaLogical.x) ? 0.0 : deltaLogical.x, std::isnan(deltaLogical.y) ? 0.0 : deltaLogical.y};
+ 
++    if (!g_pInputManager->isLocked())
++        PROTO::inputCapture->motion(newPos, deltaLogical);
++
++    if (PROTO::inputCapture->isCaptured())
++        return;
++
+     warpTo(newPos);
+ }
+ 
+@@ -924,16 +931,7 @@ void CPointerManager::attachPointer(SP<IPointer> pointer) {
+         PROTO::idle->onActivity();
+     });
+ 
+-    listener->frame = pointer->m_pointerEvents.frame.listen([] {
+-        bool shouldSkip = false;
+-        if (!g_pSeatManager->m_mouse.expired() && g_pInputManager->isLocked()) {
+-            auto PMONITOR = g_pCompositor->m_lastMonitor.get();
+-            shouldSkip    = PMONITOR && PMONITOR->shouldSkipScheduleFrameOnMouseEvent();
+-        }
+-        g_pSeatManager->m_isPointerFrameSkipped = shouldSkip;
+-        if (!g_pSeatManager->m_isPointerFrameSkipped)
+-            g_pSeatManager->sendPointerFrame();
+-    });
++    listener->frame = pointer->m_pointerEvents.frame.registerListener([](std::any e) { g_pInputManager->onMouseFrame(); });
+ 
+     listener->swipeBegin = pointer->m_pointerEvents.swipeBegin.listen([](const IPointer::SSwipeBeginEvent& event) {
+         g_pInputManager->onSwipeBegin(event);
+diff --git a/src/managers/ProtocolManager.cpp b/src/managers/ProtocolManager.cpp
+index c9690abad..27fa3aa50 100644
+--- a/src/managers/ProtocolManager.cpp
++++ b/src/managers/ProtocolManager.cpp
+@@ -49,6 +49,7 @@
+ #include "../protocols/SinglePixel.hpp"
+ #include "../protocols/SecurityContext.hpp"
+ #include "../protocols/CTMControl.hpp"
++#include "../protocols/InputCapture.hpp"
+ #include "../protocols/HyprlandSurface.hpp"
+ #include "../protocols/core/Seat.hpp"
+ #include "../protocols/core/DataDevice.hpp"
+@@ -187,6 +188,7 @@ CProtocolManager::CProtocolManager() {
+     PROTO::singlePixel         = makeUnique<CSinglePixelProtocol>(&wp_single_pixel_buffer_manager_v1_interface, 1, "SinglePixel");
+     PROTO::securityContext     = makeUnique<CSecurityContextProtocol>(&wp_security_context_manager_v1_interface, 1, "SecurityContext");
+     PROTO::ctm                 = makeUnique<CHyprlandCTMControlProtocol>(&hyprland_ctm_control_manager_v1_interface, 2, "CTMControl");
++    PROTO::inputCapture        = makeUnique<CInputCaptureProtocol>(&hyprland_input_capture_manager_v1_interface, 1, "InputCapture");
+     PROTO::hyprlandSurface     = makeUnique<CHyprlandSurfaceProtocol>(&hyprland_surface_manager_v1_interface, 2, "HyprlandSurface");
+     PROTO::contentType         = makeUnique<CContentTypeProtocol>(&wp_content_type_manager_v1_interface, 1, "ContentType");
+     PROTO::xdgTag              = makeUnique<CXDGToplevelTagProtocol>(&xdg_toplevel_tag_manager_v1_interface, 1, "XDGTag");
+@@ -288,6 +290,7 @@ CProtocolManager::~CProtocolManager() {
+     PROTO::singlePixel.reset();
+     PROTO::securityContext.reset();
+     PROTO::ctm.reset();
++    PROTO::inputCapture.reset();
+     PROTO::hyprlandSurface.reset();
+     PROTO::contentType.reset();
+     PROTO::colorManagement.reset();
+diff --git a/src/managers/SeatManager.cpp b/src/managers/SeatManager.cpp
+index 3b3d8b04b..3364421b1 100644
+--- a/src/managers/SeatManager.cpp
++++ b/src/managers/SeatManager.cpp
+@@ -5,6 +5,7 @@
+ #include "../protocols/ExtDataDevice.hpp"
+ #include "../protocols/PrimarySelection.hpp"
+ #include "../protocols/core/Compositor.hpp"
++#include "../protocols/InputCapture.hpp"
+ #include "../Compositor.hpp"
+ #include "../devices/IKeyboard.hpp"
+ #include "../desktop/LayerSurface.hpp"
+@@ -106,6 +107,7 @@ void CSeatManager::updateActiveKeyboardData() {
+     if (m_keyboard)
+         PROTO::seat->updateRepeatInfo(m_keyboard->m_repeatRate, m_keyboard->m_repeatDelay);
+     PROTO::seat->updateKeymap();
++    PROTO::inputCapture->updateKeymap();
+ }
+ 
+ void CSeatManager::setKeyboardFocus(SP<CWLSurfaceResource> surf) {
+diff --git a/src/managers/input/Eis.cpp b/src/managers/input/Eis.cpp
+new file mode 100644
+index 000000000..f61067661
+--- /dev/null
++++ b/src/managers/input/Eis.cpp
+@@ -0,0 +1,316 @@
++#include "Eis.hpp"
++
++#include "Compositor.hpp"
++#include "devices/IKeyboard.hpp"
++#include "helpers/Monitor.hpp"
++#include "managers/SeatManager.hpp"
++#include <alloca.h>
++#include <cstdint>
++#include <hyprutils/os/FileDescriptor.hpp>
++#include <libeis.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include <wayland-server-core.h>
++
++CEis::CEis(std::string socketName) {
++    Debug::log(LOG, "[EIS] Init socket: {}", socketName);
++
++    const char* xdg = getenv("XDG_RUNTIME_DIR");
++    if (xdg)
++        socketPath = std::string(xdg) + "/" + socketName;
++
++    if (socketPath.empty()) {
++        Debug::log(ERR, "[EIS] Socket path is empty");
++        return;
++    }
++
++    m_eisCtx = eis_new(nullptr);
++
++    if (eis_setup_backend_socket(m_eisCtx, socketPath.c_str())) {
++        Debug::log(ERR, "[EIS] Cannot init eis socket on {}", socketPath);
++        return;
++    }
++    Debug::log(LOG, "[EIS] Listening on {}", socketPath);
++
++    m_eventSource = wl_event_loop_add_fd(
++        g_pCompositor->m_wlEventLoop, eis_get_fd(m_eisCtx), WL_EVENT_READABLE, [](int fd, uint32_t mask, void* data) { return ((CEis*)data)->pollEvents(); }, this);
++}
++
++CEis::~CEis() {
++    wl_event_source_remove(m_eventSource);
++    Debug::log(LOG, "[EIS] Server fd {} destroyed", eis_get_fd(m_eisCtx));
++    eis_unref(m_eisCtx);
++}
++
++int CEis::pollEvents() {
++    eis_dispatch(m_eisCtx);
++
++    //Pull every available events
++    while (true) {
++        eis_event* e = eis_get_event(m_eisCtx);
++
++        if (!e) {
++            eis_event_unref(e);
++            break;
++        }
++
++        int rc = onEvent(e);
++        eis_event_unref(e);
++        if (rc != 0)
++            break;
++    }
++
++    return 0;
++}
++
++int CEis::onEvent(eis_event* e) {
++    eis_client* eisClient = nullptr;
++    eis_seat*   seat      = nullptr;
++    eis_device* device    = nullptr;
++
++    switch (eis_event_get_type(e)) {
++        case EIS_EVENT_CLIENT_CONNECT:
++            eisClient = eis_event_get_client(e);
++            Debug::log(LOG, "[EIS] {} client connected: {}", eis_client_is_sender(eisClient) ? "Sender" : "Receiver", eis_client_get_name(eisClient));
++
++            if (eis_client_is_sender(eisClient)) {
++                Debug::log(WARN, "[EIS] Unexpected sender client {} connected to input capture session", eis_client_get_name(eisClient));
++                eis_client_disconnect(eisClient);
++                return 0;
++            }
++
++            if (m_client.handle) {
++                Debug::log(WARN, "[EIS] Unexpected additional client {} connected to input capture session", eis_client_get_name(eisClient));
++                eis_client_disconnect(eisClient);
++                return 0;
++            }
++
++            m_client.handle = eisClient;
++
++            eis_client_connect(eisClient);
++            Debug::log(LOG, "[EIS] Creating new default seat");
++            seat = eis_client_new_seat(eisClient, "default");
++
++            eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER);
++            eis_seat_configure_capability(seat, EIS_DEVICE_CAP_BUTTON);
++            eis_seat_configure_capability(seat, EIS_DEVICE_CAP_SCROLL);
++            eis_seat_configure_capability(seat, EIS_DEVICE_CAP_KEYBOARD);
++            eis_seat_add(seat);
++            m_client.seat = seat;
++            break;
++        case EIS_EVENT_CLIENT_DISCONNECT:
++            eisClient = eis_event_get_client(e);
++            Debug::log(LOG, "[EIS] {} disconnected", eis_client_get_name(eisClient));
++            eis_client_disconnect(eisClient);
++
++            eis_seat_unref(m_client.seat);
++            clearPointer();
++            clearKeyboard();
++            m_client.handle = nullptr;
++            break;
++        case EIS_EVENT_SEAT_BIND:
++            Debug::log(LOG, "[EIS] Binding seats...");
++
++            if (eis_event_seat_has_capability(e, EIS_DEVICE_CAP_POINTER) && eis_event_seat_has_capability(e, EIS_DEVICE_CAP_BUTTON) &&
++                eis_event_seat_has_capability(e, EIS_DEVICE_CAP_SCROLL))
++                ensurePointer();
++            else
++                clearPointer();
++
++            if (eis_event_seat_has_capability(e, EIS_DEVICE_CAP_KEYBOARD))
++                ensureKeyboard();
++            else
++                clearKeyboard();
++            break;
++        case EIS_EVENT_DEVICE_CLOSED:
++            device = eis_event_get_device(e);
++            if (device == m_client.pointer)
++                clearPointer();
++            else if (device == m_client.keyboard) {
++                clearKeyboard();
++            } else
++                Debug::log(WARN, "[EIS] Unknown device to close");
++            break;
++        default: return 0;
++    }
++    return 0;
++}
++
++void CEis::ensurePointer() {
++    if (m_client.pointer)
++        return;
++
++    Debug::log(LOG, "[EIS] Creating pointer");
++    eis_device* pointer = eis_seat_new_device(m_client.seat);
++    eis_device_configure_name(pointer, "captured relative pointer");
++    eis_device_configure_capability(pointer, EIS_DEVICE_CAP_POINTER);
++    eis_device_configure_capability(pointer, EIS_DEVICE_CAP_BUTTON);
++    eis_device_configure_capability(pointer, EIS_DEVICE_CAP_SCROLL);
++
++    for (auto& o : g_pCompositor->m_monitors) {
++        eis_region* r = eis_device_new_region(pointer);
++
++        eis_region_set_offset(r, o->m_position.x, o->m_position.y);
++        eis_region_set_size(r, o->m_pixelSize.x, o->m_pixelSize.y);
++        eis_region_set_physical_scale(r, o->m_scale);
++        eis_region_add(r);
++        eis_region_unref(r);
++    }
++
++    eis_device_add(pointer);
++    eis_device_resume(pointer);
++
++    m_client.pointer = pointer;
++}
++
++void CEis::ensureKeyboard() {
++    if (m_client.keyboard)
++        return;
++
++    Debug::log(LOG, "[EIS] Creating keyboard");
++    eis_device* keyboard = eis_seat_new_device(m_client.seat);
++    eis_device_configure_name(keyboard, "captured keyboard");
++    eis_device_configure_capability(keyboard, EIS_DEVICE_CAP_KEYBOARD);
++
++    SKeymap _keymap = getKeymap();
++    if (_keymap.fd != -1) {
++        Debug::log(LOG, "Using keymap {}", _keymap.fd, _keymap.size);
++        eis_keymap* eis_keymap = eis_device_new_keymap(keyboard, EIS_KEYMAP_TYPE_XKB, _keymap.fd, _keymap.size);
++        if (eis_keymap) {
++            eis_keymap_add(eis_keymap);
++            eis_keymap_unref(eis_keymap);
++        } else {
++            Debug::log(LOG, "Cannot open keymap");
++        }
++    }
++
++    eis_device_add(keyboard);
++    eis_device_resume(keyboard);
++
++    m_client.keyboard = keyboard;
++}
++
++SKeymap CEis::getKeymap() {
++    SKeymap       _keymap = {.fd = -1, .size = -1};
++
++    SP<IKeyboard> keyboard = g_pSeatManager->m_keyboard.lock();
++    if (!keyboard)
++        return _keymap;
++
++    int32_t size = keyboard->m_xkbKeymapString.length() + 1;
++    int     fd   = keyboard->m_xkbKeymapFD.get();
++    _keymap.size = size;
++    _keymap.fd   = fd;
++    return _keymap;
++}
++
++void CEis::clearPointer() {
++    if (!m_client.pointer)
++        return;
++    Debug::log(LOG, "[EIS] Clearing pointer");
++
++    eis_device_remove(m_client.pointer);
++    eis_device_unref(m_client.pointer);
++    m_client.pointer = nullptr;
++}
++
++void CEis::clearKeyboard() {
++    if (!m_client.keyboard)
++        return;
++    Debug::log(LOG, "[EIS] Clearing keyboard");
++
++    eis_device_remove(m_client.keyboard);
++    eis_device_unref(m_client.keyboard);
++    m_client.keyboard = nullptr;
++}
++
++int CEis::getFileDescriptor() {
++    return eis_backend_fd_add_client(m_eisCtx);
++}
++
++void CEis::startEmulating(int sequence) {
++    Debug::log(LOG, "[EIS] Start Emulating");
++
++    if (m_client.pointer)
++        eis_device_start_emulating(m_client.pointer, sequence);
++
++    if (m_client.keyboard)
++        eis_device_start_emulating(m_client.keyboard, sequence);
++}
++
++void CEis::stopEmulating() {
++    Debug::log(LOG, "[EIS] Stop Emulating");
++
++    if (m_client.pointer)
++        eis_device_stop_emulating(m_client.pointer);
++
++    if (m_client.keyboard)
++        eis_device_stop_emulating(m_client.keyboard);
++}
++
++void CEis::resetKeyboard() {
++    if (!m_client.keyboard) //We don't re-create the keyboard if it doesn't exist
++        return;
++    clearKeyboard();
++    ensureKeyboard();
++}
++
++void CEis::resetPointer() {
++    if (!m_client.pointer) //We don't re-create the pointer if it doesn't exist
++        return;
++    clearPointer();
++    ensurePointer();
++}
++
++void CEis::sendMotion(double x, double y) {
++    if (!m_client.pointer)
++        return;
++    eis_device_pointer_motion(m_client.pointer, x, y);
++}
++
++void CEis::sendKey(uint32_t key, bool pressed) {
++    if (!m_client.keyboard)
++        return;
++    uint64_t now = eis_now(m_eisCtx);
++    eis_device_keyboard_key(m_client.keyboard, key, pressed);
++    eis_device_frame(m_client.keyboard, now);
++}
++
++void CEis::sendModifiers(uint32_t modsDepressed, uint32_t modsLatched, uint32_t modsLocked, uint32_t group) {
++    if (!m_client.keyboard)
++        return;
++    uint64_t now = eis_now(m_eisCtx);
++    eis_device_keyboard_send_xkb_modifiers(m_client.keyboard, modsDepressed, modsLatched, modsLocked, group);
++    eis_device_frame(m_client.keyboard, now);
++}
++
++void CEis::sendButton(uint32_t button, bool pressed) {
++    if (!m_client.pointer)
++        return;
++    eis_device_button_button(m_client.pointer, button, pressed);
++}
++
++void CEis::sendScrollDiscrete(int32_t x, int32_t y) {
++    if (!m_client.pointer)
++        return;
++    eis_device_scroll_discrete(m_client.pointer, x, y);
++}
++
++void CEis::sendScrollDelta(double x, double y) {
++    if (!m_client.pointer)
++        return;
++    eis_device_scroll_delta(m_client.pointer, x, y);
++}
++
++void CEis::sendScrollStop(bool x, bool y) {
++    if (!m_client.pointer)
++        return;
++    eis_device_scroll_stop(m_client.pointer, x, y);
++}
++
++void CEis::sendPointerFrame() {
++    if (!m_client.pointer)
++        return;
++    uint64_t now = eis_now(m_eisCtx);
++    eis_device_frame(m_client.pointer, now);
++}
+diff --git a/src/managers/input/Eis.hpp b/src/managers/input/Eis.hpp
+new file mode 100644
+index 000000000..f2cbbd621
+--- /dev/null
++++ b/src/managers/input/Eis.hpp
+@@ -0,0 +1,62 @@
++#pragma once
++
++#include <libeis.h>
++#include <string>
++#include <wayland-server-core.h>
++
++struct SKeymap {
++    int32_t  fd   = 0;
++    uint32_t size = 0;
++};
++
++/*
++ * Responsible to creating a socket for input communication
++ */
++class CEis {
++  public:
++    CEis(std::string socketPath);
++    ~CEis();
++
++    void startEmulating(int activationId);
++    void stopEmulating();
++
++    void resetKeyboard();
++    void resetPointer();
++
++    void sendMotion(double x, double y);
++    void sendKey(uint32_t key, bool pressed);
++    void sendModifiers(uint32_t modsDepressed, uint32_t modsLatched, uint32_t modsLocked, uint32_t group);
++    void sendButton(uint32_t button, bool pressed);
++    void sendScrollDelta(double x, double y);
++    void sendScrollDiscrete(int32_t x, int32_t y);
++    void sendScrollStop(bool stopX, bool stopY);
++    void sendPointerFrame();
++
++    int  getFileDescriptor();
++
++    //
++
++    std::string socketPath;
++
++  private:
++    int     onEvent(eis_event* e);
++    int     pollEvents();
++    void    ensurePointer();
++    void    ensureKeyboard();
++    SKeymap getKeymap();
++    void    clearPointer();
++    void    clearKeyboard();
++
++    bool    m_stop   = false;
++    eis*    m_eisCtx = nullptr;
++
++    struct SClient {
++        eis_client* handle = nullptr;
++        eis_seat*   seat   = nullptr;
++
++        eis_device* pointer  = nullptr;
++        eis_device* keyboard = nullptr;
++    } m_client;
++
++    wl_event_source* m_eventSource;
++};
+diff --git a/src/managers/input/InputManager.cpp b/src/managers/input/InputManager.cpp
+index ae355b4b2..18b65cf19 100644
+--- a/src/managers/input/InputManager.cpp
++++ b/src/managers/input/InputManager.cpp
+@@ -24,6 +24,7 @@
+ #include "../../protocols/core/DataDevice.hpp"
+ #include "../../protocols/core/Compositor.hpp"
+ #include "../../protocols/XDGShell.hpp"
++#include "../../protocols/InputCapture.hpp"
+ 
+ #include "../../devices/Mouse.hpp"
+ #include "../../devices/VirtualPointer.hpp"
+@@ -128,6 +129,9 @@ void CInputManager::onMouseMoved(IPointer::SMotionEvent e) {
+ 
+     g_pPointerManager->move(DELTA);
+ 
++    if (PROTO::inputCapture->isCaptured())
++        return;
++
+     mouseMoveUnified(e.timeMs, false, e.mouse);
+ 
+     m_lastCursorMovement.reset();
+@@ -617,6 +621,11 @@ void CInputManager::onMouseButton(IPointer::SButtonEvent e) {
+     if (e.mouse)
+         recheckMouseWarpOnMouseInput();
+ 
++    PROTO::inputCapture->button(e.button, e.state);
++
++    if (PROTO::inputCapture->isCaptured())
++        return;
++
+     m_lastCursorMovement.reset();
+ 
+     if (e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
+@@ -855,7 +864,13 @@ void CInputManager::onMouseWheel(IPointer::SAxisEvent e, SP<IPointer> pointer) {
+     if (e.mouse)
+         recheckMouseWarpOnMouseInput();
+ 
+-    bool passEvent = g_pKeybindManager->onAxisEvent(e);
++    PROTO::inputCapture->axis(e.axis, e.delta);
++    if (e.source == 0)
++        PROTO::inputCapture->axisValue120(e.axis, e.delta);
++    else if (e.delta == 0)
++        PROTO::inputCapture->axisStop(e.axis);
++
++    bool passEvent = !PROTO::inputCapture->isCaptured() && g_pKeybindManager->onAxisEvent(e);
+ 
+     if (!passEvent)
+         return;
+@@ -939,6 +954,22 @@ void CInputManager::onMouseWheel(IPointer::SAxisEvent e, SP<IPointer> pointer) {
+     g_pSeatManager->sendPointerAxis(e.timeMs, e.axis, delta, deltaDiscrete, value120, e.source, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+ }
+ 
++void CInputManager::onMouseFrame() {
++    PROTO::inputCapture->frame();
++
++    if (PROTO::inputCapture->isCaptured())
++        return;
++
++    bool shouldSkip = false;
++    if (!g_pSeatManager->m_mouse.expired() && g_pInputManager->isLocked()) {
++        auto PMONITOR = g_pCompositor->m_lastMonitor.get();
++        shouldSkip    = PMONITOR && PMONITOR->shouldSkipScheduleFrameOnMouseEvent();
++    }
++    g_pSeatManager->m_isPointerFrameSkipped = shouldSkip;
++    if (!g_pSeatManager->m_isPointerFrameSkipped)
++        g_pSeatManager->sendPointerFrame();
++}
++
+ Vector2D CInputManager::getMouseCoordsInternal() {
+     return g_pPointerManager->position();
+ }
+@@ -1445,10 +1476,12 @@ void CInputManager::onKeyboardKey(const IKeyboard::SKeyEvent& event, SP<IKeyboar
+     const auto EMAP = std::unordered_map<std::string, std::any>{{"keyboard", pKeyboard}, {"event", event}};
+     EMIT_HOOK_EVENT_CANCELLABLE("keyPress", EMAP);
+ 
++    PROTO::inputCapture->key(event.keycode, event.state);
+     bool passEvent = DISALLOWACTION;
+ 
+     if (!DISALLOWACTION)
+-        passEvent = g_pKeybindManager->onKeyEvent(event, pKeyboard);
++        passEvent = g_pKeybindManager->onKeyEvent(event, pKeyboard) && !PROTO::inputCapture->isCaptured();
++    ;
+ 
+     if (passEvent) {
+         if (USEIME) {
+@@ -1487,6 +1520,10 @@ void CInputManager::onKeyboardMod(SP<IKeyboard> pKeyboard) {
+     MODS.depressed     = ALLMODS;
+     m_lastMods         = MODS.depressed;
+ 
++    PROTO::inputCapture->modifiers(MODS.depressed, MODS.latched, MODS.locked, MODS.group);
++
++    if (PROTO::inputCapture->isCaptured())
++        return;
+     const auto IME = m_relay.m_inputMethod.lock();
+ 
+     if (IME && IME->hasGrab() && !DISALLOWACTION) {
+diff --git a/src/managers/input/InputManager.hpp b/src/managers/input/InputManager.hpp
+index 60ff49ef7..7023320d0 100644
+--- a/src/managers/input/InputManager.hpp
++++ b/src/managers/input/InputManager.hpp
+@@ -92,6 +92,7 @@ class CInputManager {
+     void               onMouseButton(IPointer::SButtonEvent);
+     void               onMouseWheel(IPointer::SAxisEvent, SP<IPointer> pointer = nullptr);
+     void               onKeyboardKey(const IKeyboard::SKeyEvent&, SP<IKeyboard>);
++    void               onMouseFrame();
+     void               onKeyboardMod(SP<IKeyboard>);
+ 
+     void               newKeyboard(SP<IKeyboard>);
+diff --git a/src/managers/permissions/DynamicPermissionManager.cpp b/src/managers/permissions/DynamicPermissionManager.cpp
+index 3f9d58dd1..b5977bbdf 100644
+--- a/src/managers/permissions/DynamicPermissionManager.cpp
++++ b/src/managers/permissions/DynamicPermissionManager.cpp
+@@ -52,6 +52,7 @@ static const char* permissionToString(eDynamicPermissionType type) {
+         case PERMISSION_TYPE_SCREENCOPY: return "PERMISSION_TYPE_SCREENCOPY";
+         case PERMISSION_TYPE_PLUGIN: return "PERMISSION_TYPE_PLUGIN";
+         case PERMISSION_TYPE_KEYBOARD: return "PERMISSION_TYPE_KEYBOARD";
++        case PERMISSION_TYPE_INPUT_CAPTURE: return "PERMISSION_TYPE_INPUT_CAPTURE";
+     }
+ 
+     return "error";
+@@ -63,6 +64,7 @@ static const char* permissionToHumanString(eDynamicPermissionType type) {
+         case PERMISSION_TYPE_SCREENCOPY: return "An application <b>{}</b> is trying to capture your screen.<br/><br/>Do you want to allow it to do so?";
+         case PERMISSION_TYPE_PLUGIN: return "An application <b>{}</b> is trying to load a plugin: <b>{}</b>.<br/><br/>Do you want to load it?";
+         case PERMISSION_TYPE_KEYBOARD: return "A new keyboard has been plugged in: {}.<br/><br/>Do you want to allow it to operate?";
++        case PERMISSION_TYPE_INPUT_CAPTURE: return "An application <b>{}</b> is trying to capture your inputs.<br/><br/>Do you want to allow it to do so?";
+     }
+ 
+     return "error";
+diff --git a/src/managers/permissions/DynamicPermissionManager.hpp b/src/managers/permissions/DynamicPermissionManager.hpp
+index 4de1eb328..5660f6157 100644
+--- a/src/managers/permissions/DynamicPermissionManager.hpp
++++ b/src/managers/permissions/DynamicPermissionManager.hpp
+@@ -18,6 +18,7 @@ enum eDynamicPermissionType : uint8_t {
+     PERMISSION_TYPE_SCREENCOPY,
+     PERMISSION_TYPE_PLUGIN,
+     PERMISSION_TYPE_KEYBOARD,
++    PERMISSION_TYPE_INPUT_CAPTURE,
+ };
+ 
+ enum eDynamicPermissionRuleSource : uint8_t {
+@@ -104,4 +105,4 @@ class CDynamicPermissionManager {
+     std::vector<SP<CDynamicPermissionRule>> m_rules;
+ };
+ 
+-inline UP<CDynamicPermissionManager> g_pDynamicPermissionManager;
+\ No newline at end of file
++inline UP<CDynamicPermissionManager> g_pDynamicPermissionManager;
+diff --git a/src/meson.build b/src/meson.build
+index d0a1590e8..63cc97ca7 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -22,6 +22,7 @@ executable(
+     dependency('egl'),
+     dependency('xkbcommon'),
+     dependency('libinput', version: '>=1.28'),
++    dependency('libeis-1.0'),
+     dependency('re2'),
+     xcb_dep,
+     xcb_composite_dep,
+diff --git a/src/protocols/InputCapture.cpp b/src/protocols/InputCapture.cpp
+new file mode 100644
+index 000000000..c8d4aad80
+--- /dev/null
++++ b/src/protocols/InputCapture.cpp
+@@ -0,0 +1,410 @@
++#include "InputCapture.hpp"
++
++#include "Compositor.hpp"
++#include "debug/Log.hpp"
++#include "hyprland-input-capture-v1.hpp"
++#include "managers/HookSystemManager.hpp"
++#include "managers/permissions/DynamicPermissionManager.hpp"
++#include "protocols/WaylandProtocol.hpp"
++#include "render/Renderer.hpp"
++#include <algorithm>
++#include <cairo.h>
++#include <cstdint>
++#include <fcntl.h>
++#include <glaze/core/context.hpp>
++#include <glaze/util/parse.hpp>
++#include <hyprutils/memory/SharedPtr.hpp>
++#include <libeis.h>
++#include <optional>
++#include <string>
++
++static int eisCounter = 0;
++
++CInputCaptureResource::CInputCaptureResource(SP<CHyprlandInputCaptureV1> resource_, std::string handle) : m_sessionId(handle), m_resource(resource_) {
++    if UNLIKELY (!good())
++        return;
++    Debug::log(LOG, "[input-capture]({}) new session", m_sessionId.c_str());
++
++    m_resource->setOnDestroy([this](CHyprlandInputCaptureV1* r) { PROTO::inputCapture->destroyResource(this); }); //Remove & free this session
++
++    m_resource->setEnable([this](CHyprlandInputCaptureV1* r) { onEnable(); });
++    m_resource->setAddBarrier(
++        [this](CHyprlandInputCaptureV1* r, uint32_t zoneSet, uint32_t id, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2) { onAddBarrier(zoneSet, id, x1, y1, x2, y2); });
++    m_resource->setDisable([this](CHyprlandInputCaptureV1* r) { disable(); });
++    m_resource->setRelease([this](CHyprlandInputCaptureV1* r, uint32_t activationId, double x, double y) { onRelease(activationId, x, y); });
++    m_resource->setClearBarriers([this](CHyprlandInputCaptureV1* r) { onClearBarriers(); });
++
++    m_eis = makeUnique<CEis>("eis-" + std::to_string(eisCounter++));
++
++    m_resource->sendEisFd(m_eis->getFileDescriptor());
++
++    m_monitorCallback = g_pHookSystem->hookDynamic("monitorLayoutChanged", [this](void* self, SCallbackInfo& info, std::any param) {
++        onClearBarriers();
++        disable();
++        m_eis->resetPointer();
++    });
++}
++
++CInputCaptureResource::~CInputCaptureResource() {
++    if (m_status == CLIENT_STATUS_ACTIVATED)
++        PROTO::inputCapture->forceRelease();
++
++    Debug::log(LOG, "[input-capture]({}) session destroyed", m_sessionId.c_str());
++    g_pHookSystem->unhook(m_monitorCallback);
++    PROTO::inputCapture->clearBarriers(m_sessionId);
++};
++
++bool CInputCaptureResource::enabled() {
++    return m_status == CLIENT_STATUS_ENABLED;
++}
++
++bool CInputCaptureResource::good() {
++    return m_resource->resource();
++}
++
++void CInputCaptureResource::onEnable() {
++    Debug::log(LOG, "[input-capture]({}) session enabled", m_sessionId.c_str());
++    m_status = CLIENT_STATUS_ENABLED;
++}
++
++enum eValidResult : uint8_t {
++    INVALID,
++    PARTIAL,
++    VALID
++};
++
++static eValidResult isBarrierValidAgainstMonitor(int x1, int y1, int x2, int y2, PHLMONITOR monitor) {
++    int mx1 = monitor->m_position.x;
++    int my1 = monitor->m_position.y;
++    int mx2 = mx1 + monitor->m_pixelSize.x - 1;
++    int my2 = my1 + monitor->m_pixelSize.y - 1;
++
++    if (x1 == x2) {                     //If zone is vertical
++        if (x1 != mx1 && x1 != mx2 + 1) //If the zone don't touch the left or right side
++            return INVALID;
++
++        if (y1 != my1 || y2 != my2) {                                 //If the zone is shorter than the height of the screen
++            if ((my1 <= y1 && y1 <= my2) || (my1 <= y2 && y2 <= my2)) //Maybe the segments are overlapping
++                return PARTIAL;
++            return INVALID;
++        }
++    } else {
++        if (y1 != my1 && y1 != my2 + 1) //If the zone don't touch the bottom or top side
++            return INVALID;
++
++        if (x1 != mx1 || x2 != mx2) {                                 //If the zone is shorter than the height of the screen
++            if ((mx1 <= x1 && x1 <= mx2) || (mx1 <= x2 && x2 <= mx2)) //Maybe the segments are overlapping
++                return PARTIAL;
++            return INVALID;
++        }
++    }
++
++    return VALID;
++}
++
++static bool isBarrierValid(int x1, int y1, int x2, int y2) {
++    if (x1 != x2 && y1 != y2) //At least one axis should be aligned
++        return false;
++
++    if (x1 == x2 && y1 == y2) //The barrier should have non-null area
++        return false;
++
++    if (x1 > x2)
++        std::swap(x1, x2);
++
++    if (y1 > y2)
++        std::swap(y1, y2);
++
++    int valid   = 0;
++    int partial = 0; //Used to detect if a barrier is placed on the side of two monitors
++    for (auto& o : g_pCompositor->m_monitors) {
++        switch (isBarrierValidAgainstMonitor(x1, y1, x2, y2, o)) {
++            case VALID: valid++; break;
++            case PARTIAL: partial++; break;
++            case INVALID: break;
++        }
++    }
++
++    return valid == 1 && partial == 0;
++}
++
++void CInputCaptureResource::onAddBarrier(uint32_t zoneSet, uint32_t id, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2) {
++    bool valid = isBarrierValid(x1, y1, x2, y2);
++
++    if (!valid) {
++        m_resource->error(HYPRLAND_INPUT_CAPTURE_V1_ERROR_INVALID_BARRIER, "The barrier id " + std::to_string(id) + " is invalid");
++        Debug::log(LOG, "[input-capture]({}) Barrier {} is invalid [{}, {}], [{}, {}]", m_sessionId.c_str(), id, x1, y1, x2, y2);
++
++        return;
++    }
++
++    Debug::log(LOG, "[input-capture]({}) Barrier {} [{}, {}], [{}, {}] added", m_sessionId.c_str(), id, x1, y1, x2, y2);
++
++    PROTO::inputCapture->addBarrier({.sessionId = m_sessionId, .id = id, .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2});
++}
++
++void CInputCaptureResource::onDisable() {
++    disable();
++}
++
++void CInputCaptureResource::onRelease(uint32_t activationId_, double x, double y) {
++    if (activationId_ != m_activationId) { // If id is invalid we still want to release the mouse to avoid any issue
++        Debug::log(WARN, "[input-capture]({}) Invalid activation id {} expected {}", m_sessionId.c_str(), activationId_, m_activationId);
++    }
++
++    deactivate();
++
++    if (x != -1 && y != -1)
++        g_pCompositor->warpCursorTo({x, y}, true);
++    g_pHyprRenderer->ensureCursorRenderingMode();
++}
++
++void CInputCaptureResource::onClearBarriers() {
++    PROTO::inputCapture->clearBarriers(m_sessionId);
++}
++
++bool CInputCaptureResource::activate(double x, double y, uint32_t borderId) {
++    if (m_status != CLIENT_STATUS_ENABLED)
++        return false;
++
++    const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_INPUT_CAPTURE);
++    if (PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW)
++        return false;
++
++    m_activationId += 5;
++    m_status = CLIENT_STATUS_ACTIVATED;
++    Debug::log(LOG, "[input-capture]({}) Input captured, activationId: {}, borderId: {}, x: {}, y: {}", m_sessionId.c_str(), m_activationId, borderId, x, y);
++    m_eis->startEmulating(m_activationId);
++    g_pHyprRenderer->ensureCursorRenderingMode();
++    m_resource->sendActivated(m_activationId, x, y, borderId);
++
++    return true;
++}
++
++void CInputCaptureResource::deactivate() {
++    if (m_status != CLIENT_STATUS_ACTIVATED)
++        return;
++
++    Debug::log(LOG, "[input-capture]({}) Input released", m_sessionId.c_str());
++    m_status = CLIENT_STATUS_ENABLED;
++    m_eis->stopEmulating();
++    PROTO::inputCapture->release();
++
++    m_resource->sendDeactivated(m_activationId);
++}
++
++void CInputCaptureResource::disable() {
++    if (m_status == CLIENT_STATUS_ACTIVATED)
++        deactivate();
++    if (m_status != CLIENT_STATUS_ENABLED)
++        return;
++    m_status = CLIENT_STATUS_CREATED;
++
++    m_resource->sendDisabled();
++}
++
++void CInputCaptureResource::motion(double dx, double dy) {
++    m_eis->sendMotion(dx, dy);
++}
++
++void CInputCaptureResource::key(uint32_t key, bool pressed) {
++    m_eis->sendKey(key, pressed);
++}
++
++void CInputCaptureResource::modifiers(uint32_t modsDepressed, uint32_t modsLatched, uint32_t modsLocked, uint32_t group) {
++    m_eis->sendModifiers(modsDepressed, modsLatched, modsLocked, group);
++}
++
++void CInputCaptureResource::button(uint32_t button, bool pressed) {
++    m_eis->sendButton(button, pressed);
++}
++
++void CInputCaptureResource::axis(bool axis, double value) {
++    int32_t x = 0;
++    int32_t y = 0;
++
++    if (axis)
++        x = value;
++    else
++        y = value;
++
++    m_eis->sendScrollDelta(x, y);
++}
++
++void CInputCaptureResource::axisValue120(bool axis, int32_t value120) {
++    int32_t x = 0;
++    int32_t y = 0;
++
++    if (axis)
++        x = value120;
++    else
++        y = value120;
++
++    m_eis->sendScrollDiscrete(x, y);
++}
++
++void CInputCaptureResource::axisStop(bool axis) {
++    m_eis->sendScrollStop(axis, !axis);
++}
++
++void CInputCaptureResource::frame() {
++    m_eis->sendPointerFrame();
++}
++
++static bool isLineIntersect(double p0X, double p0Y, double p1X, double p1Y, double p2X, double p2Y, double p3X, double p3Y) {
++    float s1X = p1X - p0X;
++    float s1Y = p1Y - p0Y;
++    float s2X = p3X - p2X;
++    float s2Y = p3Y - p2Y;
++    float s   = (-s1Y * (p0X - p2X) + s1X * (p0Y - p2Y)) / (-s2X * s1Y + s1X * s2Y);
++    float t   = (s2X * (p0Y - p2Y) - s2Y * (p0X - p2X)) / (-s2X * s1Y + s1X * s2Y);
++
++    return s >= 0 && s <= 1 && t >= 0 && t <= 1;
++}
++
++static bool testCollision(SBarrier barrier, double px, double py, double nx, double ny) {
++    return isLineIntersect(barrier.x1, barrier.y1, barrier.x2, barrier.y2, px, py, nx, ny);
++}
++
++std::optional<SBarrier> CInputCaptureProtocol::isColliding(double px, double py, double nx, double ny) {
++    for (const auto& barrier : barriers) {
++        auto session = getSession(barrier.sessionId);
++        if (!session.has_value())
++            continue;
++        if (!session.value()->enabled())
++            continue;
++
++        if (testCollision(barrier, px, py, nx, ny))
++            return std::optional(barrier);
++    }
++
++    return std::nullopt;
++}
++
++CInputCaptureProtocol::CInputCaptureProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
++    ;
++}
++
++void CInputCaptureProtocol::bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id) {
++    const auto& RESOURCE = m_vManagers.emplace_back(makeUnique<CHyprlandInputCaptureManagerV1>(client, ver, id));
++
++    RESOURCE->setOnDestroy([this](CHyprlandInputCaptureManagerV1* p) { std::erase_if(m_vManagers, [&](const auto& other) { return other->resource() == p->resource(); }); });
++
++    RESOURCE->setCreateSession([this](CHyprlandInputCaptureManagerV1* pMgr, uint32_t id, std::string handle) { onCreateSession(pMgr, id, handle); });
++}
++
++void CInputCaptureProtocol::onCreateSession(CHyprlandInputCaptureManagerV1* pMgr, uint32_t id, std::string handle) {
++    const auto RESOURCE = m_Sessions.emplace_back(makeShared<CInputCaptureResource>(makeShared<CHyprlandInputCaptureV1>(pMgr->client(), pMgr->version(), id), handle));
++
++    if UNLIKELY (!RESOURCE->good()) {
++        pMgr->noMemory();
++        m_Sessions.pop_back();
++        return;
++    }
++
++    LOGM(LOG, "New InputCapture at id {}", id);
++}
++
++void CInputCaptureProtocol::destroyResource(CInputCaptureResource* resource) {
++    std::erase_if(m_Sessions, [resource](const auto& other) { return other->m_sessionId == resource->m_sessionId; });
++}
++
++bool CInputCaptureProtocol::isCaptured() {
++    return active != nullptr;
++}
++
++void CInputCaptureProtocol::updateKeymap() {
++    for (auto& session : m_Sessions) {
++        session->updateKeymap();
++    }
++}
++
++void CInputCaptureProtocol::motion(const Vector2D& absolutePosition, const Vector2D& delta) {
++    auto [x, y]   = absolutePosition;
++    auto [dx, dy] = delta;
++
++    auto matched = isColliding(x, y, x - dx, y - dy);
++    if (matched.has_value()) {
++        auto session = getSession(matched->sessionId);
++        if (!session.has_value()) {
++            LOGM(ERR, "Cannot find session {} for triggering barrier {}", matched.value().id, matched.value().sessionId);
++            return;
++        }
++        if (session.value()->activate(x, y, matched.value().id))
++            active = session.value();
++    }
++
++    if (active)
++        active->motion(dx, dy);
++}
++
++std::optional<SP<CInputCaptureResource>> CInputCaptureProtocol::getSession(std::string sessionId) {
++    auto result = std::ranges::find_if(m_Sessions, [sessionId](SP<CInputCaptureResource> elem) { return sessionId == elem->m_sessionId; });
++    if (result == m_Sessions.end())
++        return std::nullopt;
++
++    return std::optional(*result);
++}
++
++void CInputCaptureProtocol::addBarrier(SBarrier barrier) {
++    barriers.emplace_back(barrier);
++}
++
++void CInputCaptureProtocol::clearBarriers(std::string sessionId) {
++    std::erase_if(barriers, [sessionId](SBarrier b) { return b.sessionId == sessionId; });
++    Debug::log(LOG, "[input-capture]({}) Barriers cleared", sessionId.c_str());
++}
++
++void CInputCaptureProtocol::release() {
++    active = nullptr;
++}
++
++void CInputCaptureProtocol::forceRelease() {
++    Debug::log(LOG, "[input-capture] Force release input capture");
++    if (active) {
++        auto cpy = active; //Because deactivate will put active to nullptr
++        cpy->deactivate();
++        cpy->disable();
++    }
++    release();
++}
++
++void CInputCaptureProtocol::key(uint32_t keyCode, wl_keyboard_key_state state) {
++    if (active)
++        active->key(keyCode, state);
++}
++
++void CInputCaptureProtocol::modifiers(uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked, uint32_t group) {
++    if (active)
++        active->modifiers(mods_depressed, mods_latched, mods_locked, group);
++}
++
++void CInputCaptureProtocol::button(uint32_t button, wl_pointer_button_state state) {
++    if (active)
++        active->button(button, state);
++}
++
++void CInputCaptureProtocol::axis(wl_pointer_axis axis, double value) {
++    if (active)
++        active->axis(axis, value);
++}
++
++void CInputCaptureProtocol::axisValue120(wl_pointer_axis axis, int32_t value120) {
++    if (active)
++        active->axisValue120(axis, value120);
++}
++
++void CInputCaptureProtocol::axisStop(wl_pointer_axis axis) {
++    if (active)
++        active->axisStop(axis);
++}
++
++void CInputCaptureProtocol::frame() {
++    if (active)
++        active->frame();
++}
++
++void CInputCaptureResource::updateKeymap() {
++    Debug::log(LOG, "[input-capture] Got new keymap, reseting keyboard");
++    m_eis->resetKeyboard();
++}
+diff --git a/src/protocols/InputCapture.hpp b/src/protocols/InputCapture.hpp
+new file mode 100644
+index 000000000..d787d0cf7
+--- /dev/null
++++ b/src/protocols/InputCapture.hpp
+@@ -0,0 +1,108 @@
++#pragma once
++
++#include "managers/input/Eis.hpp"
++#include "helpers/memory/Memory.hpp"
++#include "hyprland-input-capture-v1.hpp"
++#include "../protocols/WaylandProtocol.hpp"
++#include <cstdint>
++#include <hyprutils/math/Vector2D.hpp>
++#include <optional>
++#include <wayland-server.h>
++
++enum eClientStatus : uint8_t {
++    CLIENT_STATUS_CREATED,   //Is ready to be activated
++    CLIENT_STATUS_ENABLED,   //Is ready for receiving inputs
++    CLIENT_STATUS_ACTIVATED, //Currently receiving inputs
++    CLIENT_STATUS_STOPPED    //Can no longer be activated
++};
++
++struct SBarrier {
++    std::string sessionId = "";
++    uint        id        = 0;
++    int         x1        = 0;
++    int         y1        = 0;
++    int         x2        = 0;
++    int         y2        = 0;
++};
++
++class CInputCaptureResource {
++  public:
++    CInputCaptureResource(SP<CHyprlandInputCaptureV1> resource_, std::string handle);
++    ~CInputCaptureResource();
++
++    void motion(double dx, double dy);
++    void key(uint32_t key, bool pressed);
++    void modifiers(uint32_t modsDepressed, uint32_t modsLatched, uint32_t modsLocked, uint32_t group);
++    void button(uint32_t button, bool pressed);
++    void axis(bool axis, double value);
++    void axisValue120(bool axis, int32_t value120);
++    void axisStop(bool axis);
++    void frame();
++    void updateKeymap();
++
++    bool activate(double x, double y, uint32_t borderId);
++    void disable();
++    void deactivate();
++
++    bool enabled();
++    bool good();
++
++    //
++    std::string m_sessionId;
++
++  private:
++    void onEnable();
++    void onAddBarrier(uint32_t zoneSet, uint32_t id, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2);
++    void onDisable();
++    void onRelease(uint32_t activationId, double x, double y);
++    void onClearBarriers();
++
++    //
++    SP<CHyprlandInputCaptureV1> m_resource;
++    UP<CEis>                    m_eis;
++
++    uint32_t                    m_activationId = 0;
++    eClientStatus               m_status       = eClientStatus::CLIENT_STATUS_CREATED;
++    SP<HOOK_CALLBACK_FN>        m_monitorCallback;
++};
++
++class CInputCaptureProtocol : public IWaylandProtocol {
++  public:
++    CInputCaptureProtocol(const wl_interface* iface, const int& ver, const std::string& name);
++    void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
++    void destroyResource(CInputCaptureResource* pointer);
++
++    void addBarrier(SBarrier barrier);
++    void clearBarriers(std::string sessionId);
++
++    void updateKeymap();
++
++    bool isCaptured();
++
++    void motion(const Vector2D& absolutePosition, const Vector2D& delta);
++    void key(uint32_t keyCode, wl_keyboard_key_state state);
++    void modifiers(uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked, uint32_t group);
++    void button(uint32_t button, wl_pointer_button_state state);
++    void axis(wl_pointer_axis axis, double value);
++    void axisValue120(wl_pointer_axis axis, int32_t value120);
++    void axisStop(wl_pointer_axis axis);
++    void frame();
++    void forceRelease();
++
++    void release();
++
++  private:
++    std::vector<UP<CHyprlandInputCaptureManagerV1>> m_vManagers;
++    std::vector<SP<CInputCaptureResource>>          m_Sessions;
++    SP<CInputCaptureResource>                       active = nullptr;
++    std::vector<SBarrier>                           barriers;
++
++    //
++    void                                     onCreateSession(CHyprlandInputCaptureManagerV1* pMgr, uint32_t id, std::string handle);
++    std::optional<SBarrier>                  isColliding(double px, double py, double nx, double ny);
++    std::optional<SP<CInputCaptureResource>> getSession(std::string sessionId);
++};
++
++namespace PROTO {
++    inline UP<CInputCaptureProtocol> inputCapture;
++}
+diff --git a/src/protocols/core/Output.cpp b/src/protocols/core/Output.cpp
+index d0f057e3d..0f918b32f 100644
+--- a/src/protocols/core/Output.cpp
++++ b/src/protocols/core/Output.cpp
+@@ -76,8 +76,8 @@ void CWLOutputResource::updateState() {
+ 
+     m_resource->sendMode(WL_OUTPUT_MODE_CURRENT, m_monitor->m_pixelSize.x, m_monitor->m_pixelSize.y, m_monitor->m_refreshRate * 1000.0);
+ 
+-    m_resource->sendGeometry(0, 0, m_monitor->m_output->physicalSize.x, m_monitor->m_output->physicalSize.y, m_monitor->m_output->subpixel, m_monitor->m_output->make.c_str(),
+-                             m_monitor->m_output->model.c_str(), m_monitor->m_transform);
++    m_resource->sendGeometry(m_monitor->m_position.x, m_monitor->m_position.y, m_monitor->m_output->physicalSize.x, m_monitor->m_output->physicalSize.y,
++                             m_monitor->m_output->subpixel, m_monitor->m_output->make.c_str(), m_monitor->m_output->model.c_str(), m_monitor->m_transform);
+ 
+     if (m_resource->version() >= 2)
+         m_resource->sendDone();
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index edf0f7d1d..ea645aa89 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -22,6 +22,7 @@
+ #include "../protocols/core/Compositor.hpp"
+ #include "../protocols/DRMSyncobj.hpp"
+ #include "../protocols/LinuxDMABUF.hpp"
++#include "../protocols/InputCapture.hpp"
+ #include "../helpers/sync/SyncTimeline.hpp"
+ #include "../hyprerror/HyprError.hpp"
+ #include "../debug/HyprDebugOverlay.hpp"
+@@ -2105,8 +2106,8 @@ void CHyprRenderer::ensureCursorRenderingMode() {
+ 
+     m_cursorHiddenByCondition = m_cursorHiddenConditions.hiddenOnTimeout || m_cursorHiddenConditions.hiddenOnTouch || m_cursorHiddenConditions.hiddenOnKeyboard;
+ 
+-    const bool HIDE = m_cursorHiddenByCondition || (*PINVISIBLE != 0);
+-
++    const bool HIDE = m_cursorHiddenByCondition || (*PINVISIBLE != 0) ||
++				PROTO::inputCapture->isCaptured();
+     if (HIDE == m_cursorHidden)
+         return;
+ 

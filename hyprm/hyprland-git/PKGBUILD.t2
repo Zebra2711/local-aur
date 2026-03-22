@@ -1,0 +1,206 @@
+# Maintainer: FabioLolix
+# Maintainer: éclairevoyant
+# Maintainer: alba4k <blaskoazzolaaaron[at]gmail.com>
+# Contributor: ThatOneCalculator <kainoa at t1c dot dev>
+
+_pkgname="hyprland"
+pkgname="$_pkgname-git"
+pkgver=0.54.0.r60.gbca18cd
+pkgrel=1
+pkgdesc="Hyprland is an independent, highly customizable, dynamic tiling Wayland compositor that doesn't sacrifice on its looks"
+arch=('x86_64' 'aarch64')
+url="https://github.com/hyprwm/Hyprland"
+license=('BSD-3-Clause')
+
+depends=(
+  aquamarine-git
+  cairo
+  gcc-libs
+  glib2
+  glibc
+  glslang
+  hyprcursor-git
+  hyprgraphics-git
+  hyprland-guiutils-git
+  hyprlang-git
+  hyprutils-git
+  hyprwire-git
+  libdisplay-info
+  libdrm
+  libglvnd
+  libinput
+  libliftoff
+  libx11
+  libxcb
+  libxcomposite
+  libxcursor
+  libxfixes
+  libxkbcommon
+  libxrender
+  mesa
+  muparser
+  opengl-driver
+  pango
+  pixman
+  polkit
+  re2
+  seatd
+  systemd-libs
+  tomlplusplus
+  util-linux-libs
+  wayland
+  wayland-protocols
+  xcb-proto
+  xcb-util
+  xcb-util-errors
+  xcb-util-image
+  xcb-util-keysyms
+  xcb-util-renderutil
+  xcb-util-wm
+  xorg-xwayland
+)
+makedepends=(
+  cmake
+  git
+  glaze
+  hyprland-protocols-git
+  hyprwayland-scanner-git
+  ninja
+  patch
+  #pkgconf
+  python # required by udis86
+  xorgproto
+)
+optdepends=(
+  'cmake: to build and install plugins using hyprpm'
+  'cpio: to build and install plugins using hyprpm'
+  'glaze: to build and install plugins using hyprpm'
+  'hyprqt6engine-git: the recommended way to manage qt styles'
+  'meson: to build and install plugins using hyprpm'
+  'uwsm: the recommended way to start Hyprland'
+)
+
+conflicts=("$_pkgname")
+provides=("$_pkgname=${pkgver%%.r*}" "wayland-compositor")
+_url_patches=https://patch-diff.githubusercontent.com/raw/hyprwm/Hyprland/pull
+_pkgsrc=$_pkgname
+_commit=8685fd7b0c2afe06c798554dea80c53f98d73894
+#_commit=5cf53f581b8b383fe7b1bf9bb9e28c72394e2e16
+source=(
+  "$_pkgsrc::git+$url.git#commit=$_commit"
+  "udis86::git+https://github.com/canihavesomecoffee/udis86.git"
+  "tracy::git+https://github.com/wolfpld/tracy.git"
+)
+sha256sums=(
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
+
+backup=("usr/share/xdg-desktop-portal/hyprland-portals.conf")
+
+declare -g _patches=(
+  # Staging
+  [6446]="xwayland: support HiDPI scale"
+  #[7919]="Implement new Input Capture protocol"
+  [11572]="screencopy: implement transparency for non-shareable windows"
+  #[11704]="dwindle: add smart_split_on_drop option"
+  #[13313]="Window: onX11ConfigureRequest reject requests that violate window rules"
+  [13387]="set deadline on buffers"
+  [13636]="desktop/windowRule: fix matching CONTENT"
+  [13634]="algo/scroll: fix unsigned wrap"
+  [13614]="layout/groupTarget: fix crash on null space assignment"
+  [13140]="layout: fix drag_threshold window snap regression"
+  [13635]="algo/dwindle: do NOT use smart_split for overridden focal point"
+  [13038]="algo/dwindle: Respect force_split when moving windows to workspaces"
+  [13652]="layout: fix null deref in focalPointForDir and moveInDirection"
+  #[13674]="Fix: monitor reconnect crashes"
+  [13607]="compositor: When processing fullscreen states, only use effective mode where necessary"
+)
+
+if [[ ${#_patches[@]} -gt 0 ]]; then
+    if [[ ! -d "patches" ]]; then
+      mkdir -p "patches"
+    fi
+    for mr in "${!_patches[@]}"; do
+        desc=$(echo "${_patches[$mr]}" | tr " " "-" | tr -d ":." | tr "/" "_")
+        filepath="patches/${mr}-${desc}.patch"
+        source+=("$filepath::${_url_patches}/${mr}.diff")
+        local checksum="$(sha256sum "$filepath" | awk '{print $1}')" || "SKIP"
+        sha256sums+=($checksum)
+    done
+fi
+
+prepare() {
+  read -s
+  cd "$_pkgsrc"
+  git submodule init
+  git config submodule.subprojects/udis86.url "$srcdir/udis86"
+  git config submodule.subprojects/tracy.url "$srcdir/tracy"
+  #git config submodule.subprojects/tracy.update none
+  git -c protocol.file.allow=always submodule update --init --recursive --remote subprojects/hyprland-protocols subprojects/udis86 subprojects/tracy
+  cd subprojects/tracy
+  git checkout 05cceee0df3b8d7c6fa87e9638af311dbabc63cb
+  cd ../..
+  read -s
+  if [[ -z "$(git config --get user.name)" ]]; then
+    git config user.name local && git config user.email '<>' && git config commit.gpgsign false
+  fi
+
+  # [[ ! -d "patches" ]] && cp -r "${startdir}/patches" "${srcdir}/"
+
+  #sed -i 's/find_package(glaze 6/find_package(glaze 7/' "hyprpm/CMakeLists.txt"
+
+  git cherry-pick 36b19075f3a644a4095352d778e6d03e103bb334
+  local skip=('subprojects/*' 'flake.lock' '.github/*' 'nix/*')
+  # local filter=(-p1 "${_skip[@]/#/-x }")
+  local filter="-p1"
+  for diff in "${skip[@]}"; do
+    filter+=" -x '$diff'"
+  done
+  for mr in "${!_patches[@]}"; do
+    msg2 "${mr}: ${_patches[${mr}]}"
+    desc=$(echo "${_patches[$mr]}" | tr " " "-" | tr -d ":." | tr "/" "_")
+    local file="$srcdir/patches/${mr}-${desc}.patch"
+    local patch_cmd="filterdiff ${filter} \"$file\" | patch --no-backup-if-mismatch -Np1"
+
+    # Test if patch applies cleanly with --dry-run
+    if ! eval "$patch_cmd --dry-run" &>/dev/null; then
+      error "Patch ${mr} will fail to apply"
+      [[ -n "$(git status --porcelain)" ]] && git add . && git commit -m "Applied patches before ${mr} failure"
+      eval "$patch_cmd" || true
+      find . -name "*.rej" -exec catdiff {} \;
+      return 1
+    fi
+    eval "$patch_cmd"
+  done
+
+}
+
+pkgver() {
+  cd "$_pkgsrc"
+  git describe --long --tags --abbrev=7 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+build() {
+  local cmake_options=(
+    -B build
+    -S "$_pkgsrc"
+    -G Ninja
+    -W no-dev
+    -D CMAKE_BUILD_TYPE=None
+    -D CMAKE_INSTALL_PREFIX=/usr
+    -D BUILD_TESTING=OFF
+    -D WITH_TESTS=OFF
+    -D USE_TRACY=ON
+  )
+  cmake "${cmake_options[@]}"
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm0644 "$_pkgsrc/LICENSE" -t "$pkgdir/usr/share/licenses/${pkgname}/"
+  install -Dm0644 "$_pkgsrc/subprojects/udis86/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-udis86"
+  sed -i 's/Name=Hyprland/Name=Hyprland0/' "$pkgdir/usr/share/wayland-sessions/hyprland.desktop"
+}

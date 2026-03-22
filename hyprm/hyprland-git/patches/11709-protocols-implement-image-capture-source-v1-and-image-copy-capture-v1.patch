@@ -1,0 +1,4469 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f84a8aea7ab..87461645666 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -556,6 +556,8 @@ protocolnew("staging/ext-data-control" "ext-data-control-v1" false)
+ protocolnew("staging/pointer-warp" "pointer-warp-v1" false)
+ protocolnew("staging/fifo" "fifo-v1" false)
+ protocolnew("staging/commit-timing" "commit-timing-v1" false)
++protocolnew("staging/ext-image-capture-source" "ext-image-capture-source-v1" false)
++protocolnew("staging/ext-image-copy-capture" "ext-image-copy-capture-v1" false)
+ 
+ protocolwayland()
+ 
+diff --git a/src/Compositor.cpp b/src/Compositor.cpp
+index f05ff2f3d74..1057acebe21 100644
+--- a/src/Compositor.cpp
++++ b/src/Compositor.cpp
+@@ -20,6 +20,7 @@
+ #include "managers/ANRManager.hpp"
+ #include "managers/eventLoop/EventLoopManager.hpp"
+ #include "managers/permissions/DynamicPermissionManager.hpp"
++#include "managers/screenshare/ScreenshareManager.hpp"
+ #include <algorithm>
+ #include <aquamarine/output/Output.hpp>
+ #include <bit>
+diff --git a/src/config/ConfigManager.cpp b/src/config/ConfigManager.cpp
+index 4bcbf45af0d..54b73a3d419 100644
+--- a/src/config/ConfigManager.cpp
++++ b/src/config/ConfigManager.cpp
+@@ -2863,6 +2863,8 @@ std::optional<std::string> CConfigManager::handlePermission(const std::string& c
+ 
+     if (data[1] == "screencopy")
+         type = PERMISSION_TYPE_SCREENCOPY;
++    else if (data[1] == "cursorpos")
++        type = PERMISSION_TYPE_CURSOR_POS;
+     else if (data[1] == "plugin")
+         type = PERMISSION_TYPE_PLUGIN;
+     else if (data[1] == "keyboard" || data[1] == "keeb")
+diff --git a/src/desktop/view/Window.cpp b/src/desktop/view/Window.cpp
+index d94ee79a6a2..b43e181c473 100644
+--- a/src/desktop/view/Window.cpp
++++ b/src/desktop/view/Window.cpp
+@@ -653,6 +653,18 @@ void CWindow::onMap() {
+         },
+         false);
+ 
++    m_realSize->setUpdateCallback([this](auto) {
++        if (m_isMapped)
++            m_events.resize.emit();
++    });
++
++    m_realPosition->setUpdateCallback([this](auto) {
++        if (m_isMapped && m_monitor != m_prevMonitor) {
++            m_prevMonitor = m_monitor;
++            m_events.monitorChanged.emit();
++        }
++    });
++
+     m_movingFromWorkspaceAlpha->setValueAndWarp(1.F);
+ 
+     m_reportedSize = m_pendingReportedSize;
+@@ -687,6 +699,9 @@ void CWindow::onBorderAngleAnimEnd(WP<CBaseAnimatedVariable> pav) {
+ void CWindow::setHidden(bool hidden) {
+     m_hidden = hidden;
+ 
++    if (hidden)
++        m_events.hide.emit();
++
+     if (hidden && Desktop::focusState()->window() == m_self)
+         Desktop::focusState()->window().reset();
+ 
+@@ -2119,6 +2134,7 @@ void CWindow::unmapWindow() {
+         m_originalClosedExtents = getFullWindowExtents();
+     }
+ 
++    m_events.unmap.emit();
+     g_pEventManager->postEvent(SHyprIPCEvent{"closewindow", std::format("{:x}", m_self.lock())});
+     EMIT_HOOK_EVENT("closeWindow", m_self.lock());
+ 
+diff --git a/src/desktop/view/Window.hpp b/src/desktop/view/Window.hpp
+index a986a63b8e1..d689ae3f948 100644
+--- a/src/desktop/view/Window.hpp
++++ b/src/desktop/view/Window.hpp
+@@ -109,6 +109,10 @@ namespace Desktop::View {
+ 
+         struct {
+             CSignalT<> destroy;
++            CSignalT<> unmap;
++            CSignalT<> hide;
++            CSignalT<> resize;
++            CSignalT<> monitorChanged;
+         } m_events;
+ 
+         WP<CXDGSurfaceResource> m_xdgSurface;
+@@ -145,7 +149,7 @@ namespace Desktop::View {
+         std::string      m_initialTitle    = "";
+         std::string      m_initialClass    = "";
+         PHLWORKSPACE     m_workspace;
+-        PHLMONITORREF    m_monitor;
++        PHLMONITORREF    m_monitor, m_prevMonitor;
+ 
+         bool             m_isMapped = false;
+ 
+diff --git a/src/helpers/Monitor.cpp b/src/helpers/Monitor.cpp
+index 593e4444f1c..1bf95fcd0d0 100644
+--- a/src/helpers/Monitor.cpp
++++ b/src/helpers/Monitor.cpp
+@@ -22,9 +22,11 @@
+ #include "../protocols/core/DataDevice.hpp"
+ #include "../render/Renderer.hpp"
+ #include "../managers/EventManager.hpp"
++#include "../managers/screenshare/ScreenshareManager.hpp"
+ #include "../managers/animation/AnimationManager.hpp"
+ #include "../managers/animation/DesktopAnimationManager.hpp"
+ #include "../managers/input/InputManager.hpp"
++#include "../managers/HookSystemManager.hpp"
+ #include "../hyprerror/HyprError.hpp"
+ #include "../layout/LayoutManager.hpp"
+ #include "../i18n/Engine.hpp"
+@@ -85,10 +87,11 @@ void CMonitor::onConnect(bool noRule) {
+             m_frameScheduler->onFrame();
+     });
+     m_listeners.commit     = m_output->events.commit.listen([this] {
+-        if (true) { // FIXME: E->state->committed & WLR_OUTPUT_STATE_BUFFER
+-            PROTO::screencopy->onOutputCommit(m_self.lock());
+-            PROTO::toplevelExport->onOutputCommit(m_self.lock());
+-        }
++        m_events.commit.emit();
++
++        // FIXME: E->state->committed & WLR_OUTPUT_STATE_BUFFER
++        if (true && Screenshare::mgr())
++            Screenshare::mgr()->onOutputCommit(m_self.lock());
+     });
+     m_listeners.needsFrame = m_output->events.needsFrame.listen([this] { g_pCompositor->scheduleFrameForMonitor(m_self.lock(), Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME); });
+ 
+diff --git a/src/helpers/Monitor.hpp b/src/helpers/Monitor.hpp
+index 3ce98d8c8cf..37f3f16a0bc 100644
+--- a/src/helpers/Monitor.hpp
++++ b/src/helpers/Monitor.hpp
+@@ -208,6 +208,7 @@ class CMonitor {
+     } m_tearingState;
+ 
+     struct {
++        CSignalT<> commit;
+         CSignalT<> destroy;
+         CSignalT<> connect;
+         CSignalT<> disconnect;
+diff --git a/src/i18n/Engine.cpp b/src/i18n/Engine.cpp
+index d31da80b453..7b77b8565ba 100644
+--- a/src/i18n/Engine.cpp
++++ b/src/i18n/Engine.cpp
+@@ -160,6 +160,8 @@ I18n::CI18nEngine::CI18nEngine() {
+ 
+     huEngine->registerEntry("en_US", TXT_KEY_PERMISSION_REQUEST_UNKNOWN, "An application <b>{app}</b> is requesting an unknown permission.");
+     huEngine->registerEntry("en_US", TXT_KEY_PERMISSION_REQUEST_SCREENCOPY, "An application <b>{app}</b> is trying to capture your screen.\n\nDo you want to allow it to?");
++    huEngine->registerEntry("en_US", TXT_KEY_PERMISSION_REQUEST_CURSOR_POS,
++                            "An application <b>{app}</b> is trying to capture your cursor position.\n\nDo you want to allow it to?");
+     huEngine->registerEntry("en_US", TXT_KEY_PERMISSION_REQUEST_PLUGIN, "An application <b>{app}</b> is trying to load a plugin: <b>{plugin}</b>.\n\nDo you want to allow it to?");
+     huEngine->registerEntry("en_US", TXT_KEY_PERMISSION_REQUEST_KEYBOARD, "A new keyboard has been detected: <b>{keyboard}</b>.\n\nDo you want to allow it to operate?");
+     huEngine->registerEntry("en_US", TXT_KEY_PERMISSION_UNKNOWN_NAME, "(unknown)");
+diff --git a/src/i18n/Engine.hpp b/src/i18n/Engine.hpp
+index c3892546c0c..79ec86f89ea 100644
+--- a/src/i18n/Engine.hpp
++++ b/src/i18n/Engine.hpp
+@@ -16,6 +16,7 @@ namespace I18n {
+ 
+         TXT_KEY_PERMISSION_REQUEST_UNKNOWN,
+         TXT_KEY_PERMISSION_REQUEST_SCREENCOPY,
++        TXT_KEY_PERMISSION_REQUEST_CURSOR_POS,
+         TXT_KEY_PERMISSION_REQUEST_PLUGIN,
+         TXT_KEY_PERMISSION_REQUEST_KEYBOARD,
+         TXT_KEY_PERMISSION_UNKNOWN_NAME,
+@@ -54,4 +55,4 @@ namespace I18n {
+     };
+ 
+     SP<CI18nEngine> i18nEngine();
+-};
+\ No newline at end of file
++};
+diff --git a/src/managers/PointerManager.cpp b/src/managers/PointerManager.cpp
+index 2d4b9502ba2..ca73e27998e 100644
+--- a/src/managers/PointerManager.cpp
++++ b/src/managers/PointerManager.cpp
+@@ -96,6 +96,10 @@ Vector2D CPointerManager::position() {
+     return m_pointerPos;
+ }
+ 
++Vector2D CPointerManager::hotspot() {
++    return m_currentCursorImage.hotspot;
++}
++
+ bool CPointerManager::hasCursor() {
+     return m_currentCursorImage.pBuffer || m_currentCursorImage.surface;
+ }
+@@ -115,6 +119,7 @@ void CPointerManager::setCursorBuffer(SP<Aquamarine::IBuffer> buf, const Vector2
+             m_currentCursorImage.scale   = scale;
+             updateCursorBackend();
+             damageIfSoftware();
++            m_events.cursorChanged.emit();
+         }
+ 
+         return;
+@@ -132,6 +137,7 @@ void CPointerManager::setCursorBuffer(SP<Aquamarine::IBuffer> buf, const Vector2
+ 
+     updateCursorBackend();
+     damageIfSoftware();
++    m_events.cursorChanged.emit();
+ }
+ 
+ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const Vector2D& hotspot) {
+@@ -143,6 +149,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+             m_currentCursorImage.scale   = surf && surf->resource() ? surf->resource()->m_current.scale : 1.F;
+             updateCursorBackend();
+             damageIfSoftware();
++            m_events.cursorChanged.emit();
+         }
+ 
+         return;
+@@ -164,6 +171,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+             recheckEnteredOutputs();
+             updateCursorBackend();
+             damageIfSoftware();
++            m_events.cursorChanged.emit();
+         });
+ 
+         if (surf->resource()->m_current.texture) {
+@@ -177,6 +185,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+     recheckEnteredOutputs();
+     updateCursorBackend();
+     damageIfSoftware();
++    m_events.cursorChanged.emit();
+ }
+ 
+ void CPointerManager::recheckEnteredOutputs() {
+@@ -261,6 +270,8 @@ void CPointerManager::resetCursorImage(bool apply) {
+             ms->cursorFrontBuffer = nullptr;
+         }
+     }
++
++    m_events.cursorChanged.emit();
+ }
+ 
+ void CPointerManager::updateCursorBackend() {
+@@ -891,6 +902,10 @@ void CPointerManager::onMonitorLayoutChange() {
+     damageIfSoftware();
+ }
+ 
++const CPointerManager::SCursorImage& CPointerManager::currentCursorImage() {
++    return m_currentCursorImage;
++}
++
+ SP<CTexture> CPointerManager::getCurrentCursorTexture() {
+     if (!m_currentCursorImage.pBuffer && (!m_currentCursorImage.surface || !m_currentCursorImage.surface->resource()->m_current.texture))
+         return nullptr;
+diff --git a/src/managers/PointerManager.hpp b/src/managers/PointerManager.hpp
+index 4b8ec65a1b0..0109268b27d 100644
+--- a/src/managers/PointerManager.hpp
++++ b/src/managers/PointerManager.hpp
+@@ -60,10 +60,34 @@ class CPointerManager {
+ 
+     //
+     Vector2D position();
++    Vector2D hotspot();
+     Vector2D cursorSizeLogical();
+ 
+     void     recheckEnteredOutputs();
+ 
++    // returns the thing in global coords
++    CBox getCursorBoxGlobal();
++
++    struct SCursorImage {
++        SP<Aquamarine::IBuffer>       pBuffer;
++        SP<CTexture>                  bufferTex;
++        WP<Desktop::View::CWLSurface> surface;
++
++        Vector2D                      hotspot;
++        Vector2D                      size;
++        float                         scale = 1.F;
++
++        CHyprSignalListener           destroySurface;
++        CHyprSignalListener           commitSurface;
++    };
++
++    const SCursorImage& currentCursorImage();
++    SP<CTexture>        getCurrentCursorTexture();
++
++    struct {
++        CSignalT<> cursorChanged;
++    } m_events;
++
+   private:
+     void recheckPointerPosition();
+     void onMonitorLayoutChange();
+@@ -79,13 +103,9 @@ class CPointerManager {
+     // returns the thing in device coordinates. Is NOT offset by the hotspot, relies on set_cursor with hotspot.
+     Vector2D getCursorPosForMonitor(PHLMONITOR pMonitor);
+     // returns the thing in logical coordinates of the monitor
+-    CBox getCursorBoxLogicalForMonitor(PHLMONITOR pMonitor);
+-    // returns the thing in global coords
+-    CBox         getCursorBoxGlobal();
+-
+-    Vector2D     transformedHotspot(PHLMONITOR pMonitor);
++    CBox     getCursorBoxLogicalForMonitor(PHLMONITOR pMonitor);
+ 
+-    SP<CTexture> getCurrentCursorTexture();
++    Vector2D transformedHotspot(PHLMONITOR pMonitor);
+ 
+     struct SPointerListener {
+         CHyprSignalListener destroy;
+@@ -137,20 +157,9 @@ class CPointerManager {
+         std::vector<CBox> monitorBoxes;
+     } m_currentMonitorLayout;
+ 
+-    struct {
+-        SP<Aquamarine::IBuffer>       pBuffer;
+-        SP<CTexture>                  bufferTex;
+-        WP<Desktop::View::CWLSurface> surface;
+-
+-        Vector2D                      hotspot;
+-        Vector2D                      size;
+-        float                         scale = 1.F;
+-
+-        CHyprSignalListener           destroySurface;
+-        CHyprSignalListener           commitSurface;
+-    } m_currentCursorImage; // TODO: support various sizes per-output so we can have pixel-perfect cursors
++    SCursorImage m_currentCursorImage; // TODO: support various sizes per-output so we can have pixel-perfect cursors
+ 
+-    Vector2D m_pointerPos = {0, 0};
++    Vector2D     m_pointerPos = {0, 0};
+ 
+     struct SMonitorPointerState {
+         SMonitorPointerState(const PHLMONITOR& m) : monitor(m) {}
+diff --git a/src/managers/ProtocolManager.cpp b/src/managers/ProtocolManager.cpp
+index 6376f2a071c..216c07f1d15 100644
+--- a/src/managers/ProtocolManager.cpp
++++ b/src/managers/ProtocolManager.cpp
+@@ -50,6 +50,8 @@
+ #include "../protocols/SecurityContext.hpp"
+ #include "../protocols/CTMControl.hpp"
+ #include "../protocols/HyprlandSurface.hpp"
++#include "../protocols/ImageCaptureSource.hpp"
++#include "../protocols/ImageCopyCapture.hpp"
+ #include "../protocols/core/Seat.hpp"
+ #include "../protocols/core/DataDevice.hpp"
+ #include "../protocols/core/Compositor.hpp"
+@@ -65,6 +67,7 @@
+ #include "../protocols/PointerWarp.hpp"
+ #include "../protocols/Fifo.hpp"
+ #include "../protocols/CommitTiming.hpp"
++#include "HookSystemManager.hpp"
+ 
+ #include "../helpers/Monitor.hpp"
+ #include "../render/Renderer.hpp"
+@@ -180,8 +183,6 @@ CProtocolManager::CProtocolManager() {
+     PROTO::dataWlr             = makeUnique<CDataDeviceWLRProtocol>(&zwlr_data_control_manager_v1_interface, 2, "DataDeviceWlr");
+     PROTO::primarySelection    = makeUnique<CPrimarySelectionProtocol>(&zwp_primary_selection_device_manager_v1_interface, 1, "PrimarySelection");
+     PROTO::xwaylandShell       = makeUnique<CXWaylandShellProtocol>(&xwayland_shell_v1_interface, 1, "XWaylandShell");
+-    PROTO::screencopy          = makeUnique<CScreencopyProtocol>(&zwlr_screencopy_manager_v1_interface, 3, "Screencopy");
+-    PROTO::toplevelExport      = makeUnique<CToplevelExportProtocol>(&hyprland_toplevel_export_manager_v1_interface, 2, "ToplevelExport");
+     PROTO::toplevelMapping     = makeUnique<CToplevelMappingProtocol>(&hyprland_toplevel_mapping_manager_v1_interface, 1, "ToplevelMapping");
+     PROTO::globalShortcuts     = makeUnique<CGlobalShortcutsProtocol>(&hyprland_global_shortcuts_manager_v1_interface, 1, "GlobalShortcuts");
+     PROTO::xdgDialog           = makeUnique<CXDGDialogProtocol>(&xdg_wm_dialog_v1_interface, 1, "XDGDialog");
+@@ -200,6 +201,12 @@ CProtocolManager::CProtocolManager() {
+     if (*PENABLECT)
+         PROTO::commitTiming = makeUnique<CCommitTimingProtocol>(&wp_commit_timing_manager_v1_interface, 1, "CommitTiming");
+ 
++    // Screensharing Protocols
++    PROTO::screencopy         = makeUnique<CScreencopyProtocol>(&zwlr_screencopy_manager_v1_interface, 3, "Screencopy");
++    PROTO::toplevelExport     = makeUnique<CToplevelExportProtocol>(&hyprland_toplevel_export_manager_v1_interface, 2, "ToplevelExport");
++    PROTO::imageCaptureSource = makeUnique<CImageCaptureSourceProtocol>(); // ctor inits actual protos, output and toplevel
++    PROTO::imageCopyCapture   = makeUnique<CImageCopyCaptureProtocol>(&ext_image_copy_capture_manager_v1_interface, 1, "ImageCopyCapture");
++
+     if (*PENABLECM)
+         PROTO::colorManagement = makeUnique<CColorManagementProtocol>(&wp_color_manager_v1_interface, 1, "ColorManagement", *PDEBUGCM);
+ 
+@@ -298,6 +305,7 @@ CProtocolManager::~CProtocolManager() {
+     PROTO::pointerWarp.reset();
+     PROTO::fifo.reset();
+     PROTO::commitTiming.reset();
++    PROTO::imageCaptureSource.reset();
+ 
+     for (auto& [_, lease] : PROTO::lease) {
+         lease.reset();
+diff --git a/src/managers/permissions/DynamicPermissionManager.cpp b/src/managers/permissions/DynamicPermissionManager.cpp
+index e286545987a..d63a72a065b 100644
+--- a/src/managers/permissions/DynamicPermissionManager.cpp
++++ b/src/managers/permissions/DynamicPermissionManager.cpp
+@@ -53,6 +53,7 @@ static const char* permissionToString(eDynamicPermissionType type) {
+         case PERMISSION_TYPE_SCREENCOPY: return "PERMISSION_TYPE_SCREENCOPY";
+         case PERMISSION_TYPE_PLUGIN: return "PERMISSION_TYPE_PLUGIN";
+         case PERMISSION_TYPE_KEYBOARD: return "PERMISSION_TYPE_KEYBOARD";
++        case PERMISSION_TYPE_CURSOR_POS: return "PERMISSION_TYPE_CURSOR_POS";
+     }
+ 
+     return "error";
+@@ -251,6 +252,7 @@ void CDynamicPermissionManager::askForPermission(wl_client* client, const std::s
+     std::string description = "";
+     switch (rule->m_type) {
+         case PERMISSION_TYPE_SCREENCOPY: description = I18n::i18nEngine()->localize(I18n::TXT_KEY_PERMISSION_REQUEST_SCREENCOPY, {{"app", appName}}); break;
++        case PERMISSION_TYPE_CURSOR_POS: description = I18n::i18nEngine()->localize(I18n::TXT_KEY_PERMISSION_REQUEST_CURSOR_POS, {{"app", appName}}); break;
+         case PERMISSION_TYPE_PLUGIN: description = I18n::i18nEngine()->localize(I18n::TXT_KEY_PERMISSION_REQUEST_PLUGIN, {{"app", appName}, {"plugin", binaryPath}}); break;
+         case PERMISSION_TYPE_KEYBOARD: description = I18n::i18nEngine()->localize(I18n::TXT_KEY_PERMISSION_REQUEST_KEYBOARD, {{"keyboard", binaryPath}}); break;
+         case PERMISSION_TYPE_UNKNOWN: description = I18n::i18nEngine()->localize(I18n::TXT_KEY_PERMISSION_REQUEST_UNKNOWN, {{"app", appName}}); break;
+diff --git a/src/managers/permissions/DynamicPermissionManager.hpp b/src/managers/permissions/DynamicPermissionManager.hpp
+index 4de1eb32880..423596c39e3 100644
+--- a/src/managers/permissions/DynamicPermissionManager.hpp
++++ b/src/managers/permissions/DynamicPermissionManager.hpp
+@@ -18,6 +18,7 @@ enum eDynamicPermissionType : uint8_t {
+     PERMISSION_TYPE_SCREENCOPY,
+     PERMISSION_TYPE_PLUGIN,
+     PERMISSION_TYPE_KEYBOARD,
++    PERMISSION_TYPE_CURSOR_POS,
+ };
+ 
+ enum eDynamicPermissionRuleSource : uint8_t {
+@@ -104,4 +105,4 @@ class CDynamicPermissionManager {
+     std::vector<SP<CDynamicPermissionRule>> m_rules;
+ };
+ 
+-inline UP<CDynamicPermissionManager> g_pDynamicPermissionManager;
+\ No newline at end of file
++inline UP<CDynamicPermissionManager> g_pDynamicPermissionManager;
+diff --git a/src/managers/screenshare/CursorshareSession.cpp b/src/managers/screenshare/CursorshareSession.cpp
+new file mode 100644
+index 00000000000..2322625f7a4
+--- /dev/null
++++ b/src/managers/screenshare/CursorshareSession.cpp
+@@ -0,0 +1,240 @@
++#include "ScreenshareManager.hpp"
++#include "../PointerManager.hpp"
++#include "../../protocols/core/Seat.hpp"
++#include "../permissions/DynamicPermissionManager.hpp"
++#include "../../render/Renderer.hpp"
++
++using namespace Screenshare;
++
++CCursorshareSession::CCursorshareSession(wl_client* client, WP<CWLPointerResource> pointer) : m_client(client), m_pointer(pointer) {
++    m_listeners.pointerDestroyed = m_pointer->m_events.destroyed.listen([this] { stop(); });
++    m_listeners.cursorChanged    = g_pPointerManager->m_events.cursorChanged.listen([this] {
++        calculateConstraints();
++        m_events.constraintsChanged.emit();
++
++        if (m_pendingFrame.pending) {
++            if (copy())
++                return;
++
++            LOGM(Log::ERR, "Failed to copy cursor image for cursor share");
++            if (m_pendingFrame.callback)
++                m_pendingFrame.callback(RESULT_NOT_COPIED);
++            m_pendingFrame.pending = false;
++            return;
++        }
++    });
++
++    calculateConstraints();
++}
++
++CCursorshareSession::~CCursorshareSession() {
++    stop();
++}
++
++void CCursorshareSession::stop() {
++    if (m_stopped)
++        return;
++    m_stopped = true;
++    m_events.stopped.emit();
++}
++
++void CCursorshareSession::calculateConstraints() {
++    const auto& cursorImage = g_pPointerManager->currentCursorImage();
++    m_constraintsChanged    = true;
++
++    // cursor is hidden, keep the previous constraints and render 0 alpha
++    if (!cursorImage.pBuffer)
++        return;
++
++    // TODO: should cursor share have a format bit flip for RGBA?
++    if (auto attrs = cursorImage.pBuffer->shm(); attrs.success) {
++        m_format = attrs.format;
++    } else {
++        // we only have shm cursors
++        return;
++    }
++
++    m_hotspot    = cursorImage.hotspot;
++    m_bufferSize = cursorImage.size;
++}
++
++// TODO: allow render to buffer without monitor and remove monitor param
++eScreenshareError CCursorshareSession::share(PHLMONITOR monitor, SP<IHLBuffer> buffer, FSourceBoxCallback sourceBoxCallback, FScreenshareCallback callback) {
++    if (m_stopped || m_pointer.expired() || m_bufferSize == Vector2D(0, 0))
++        return ERROR_STOPPED;
++
++    if UNLIKELY (!buffer || !buffer->m_resource || !buffer->m_resource->good()) {
++        LOGM(Log::ERR, "Client requested sharing to an invalid buffer");
++        return ERROR_NO_BUFFER;
++    }
++
++    if UNLIKELY (buffer->size != m_bufferSize) {
++        LOGM(Log::ERR, "Client requested sharing to an invalid buffer size");
++        return ERROR_BUFFER_SIZE;
++    }
++
++    uint32_t bufFormat;
++    if (buffer->dmabuf().success)
++        bufFormat = buffer->dmabuf().format;
++    else if (buffer->shm().success)
++        bufFormat = buffer->shm().format;
++    else {
++        LOGM(Log::ERR, "Client requested sharing to an invalid buffer");
++        return ERROR_NO_BUFFER;
++    }
++
++    if (bufFormat != m_format) {
++        LOGM(Log::ERR, "Invalid format {} in {:x}", bufFormat, (uintptr_t)this);
++        return ERROR_BUFFER_FORMAT;
++    }
++
++    m_pendingFrame.pending           = true;
++    m_pendingFrame.monitor           = monitor;
++    m_pendingFrame.buffer            = buffer;
++    m_pendingFrame.sourceBoxCallback = sourceBoxCallback;
++    m_pendingFrame.callback          = callback;
++
++    // nothing changed, then delay copy until contraints changed
++    if (!m_constraintsChanged)
++        return ERROR_NONE;
++
++    if (!copy()) {
++        LOGM(Log::ERR, "Failed to copy cursor image for cursor share");
++        callback(RESULT_NOT_COPIED);
++        m_pendingFrame.pending = false;
++        return ERROR_UNKNOWN;
++    }
++
++    return ERROR_NONE;
++}
++
++void CCursorshareSession::render() {
++    const auto  PERM = g_pDynamicPermissionManager->clientPermissionMode(m_client, PERMISSION_TYPE_CURSOR_POS);
++
++    const auto& cursorImage = g_pPointerManager->currentCursorImage();
++
++    // TODO: implement a monitor independent render mode to buffer that does this in CHyprRenderer::begin() or something like that
++    g_pHyprOpenGL->m_renderData.transformDamage = false;
++    g_pHyprOpenGL->setViewport(0, 0, m_bufferSize.x, m_bufferSize.y);
++
++    bool overlaps = g_pPointerManager->getCursorBoxGlobal().overlaps(m_pendingFrame.sourceBoxCallback());
++    if (PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW || !overlaps) {
++        // render black when not allowed
++        g_pHyprOpenGL->clear(Colors::BLACK);
++    } else if (!cursorImage.pBuffer || !cursorImage.surface || !cursorImage.bufferTex) {
++        // render clear when cursor is probably hidden
++        g_pHyprOpenGL->clear(CHyprColor(0, 0, 0, 0));
++    } else {
++        // render cursor
++        CBox texbox = {{}, cursorImage.bufferTex->m_size};
++        g_pHyprOpenGL->renderTexture(cursorImage.bufferTex, texbox, {});
++    }
++
++    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
++}
++
++bool CCursorshareSession::copy() {
++    if (!m_pendingFrame.callback || !m_pendingFrame.monitor || !m_pendingFrame.callback || !m_pendingFrame.sourceBoxCallback)
++        return false;
++
++    // FIXME: this doesn't really make sense but just to be safe
++    m_pendingFrame.callback(RESULT_TIMESTAMP);
++
++    g_pHyprRenderer->makeEGLCurrent();
++
++    CRegion fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
++    if (auto attrs = m_pendingFrame.buffer->dmabuf(); attrs.success) {
++        if (attrs.format != m_format) {
++            LOGM(Log::ERR, "Can't copy: invalid format");
++            return false;
++        }
++
++        if (!g_pHyprRenderer->beginRender(m_pendingFrame.monitor, fakeDamage, RENDER_MODE_TO_BUFFER, m_pendingFrame.buffer, nullptr, true)) {
++            LOGM(Log::ERR, "Can't copy: failed to begin rendering to dmabuf");
++            return false;
++        }
++
++        render();
++
++        g_pHyprRenderer->endRender([callback = m_pendingFrame.callback]() {
++            if (callback)
++                callback(RESULT_COPIED);
++        });
++    } else if (auto attrs = m_pendingFrame.buffer->shm(); attrs.success) {
++        auto [bufData, fmt, bufLen] = m_pendingFrame.buffer->beginDataPtr(0);
++        const auto PFORMAT          = NFormatUtils::getPixelFormatFromDRM(m_format);
++
++        if (attrs.format != m_format || !PFORMAT) {
++            LOGM(Log::ERR, "Can't copy: invalid format");
++            return false;
++        }
++
++        CFramebuffer outFB;
++        outFB.alloc(m_bufferSize.x, m_bufferSize.y, m_format);
++
++        if (!g_pHyprRenderer->beginRender(m_pendingFrame.monitor, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &outFB, true)) {
++            LOGM(Log::ERR, "Can't copy: failed to begin rendering to shm");
++            return false;
++        }
++
++        render();
++
++        g_pHyprRenderer->endRender();
++
++        g_pHyprOpenGL->m_renderData.pMonitor = m_pendingFrame.monitor;
++        outFB.bind();
++        glBindFramebuffer(GL_READ_FRAMEBUFFER, outFB.getFBID());
++
++        glPixelStorei(GL_PACK_ALIGNMENT, 1);
++
++        int glFormat = PFORMAT->glFormat;
++
++        if (glFormat == GL_RGBA)
++            glFormat = GL_BGRA_EXT;
++
++        if (glFormat != GL_BGRA_EXT && glFormat != GL_RGB) {
++            if (PFORMAT->swizzle.has_value()) {
++                std::array<GLint, 4> RGBA = SWIZZLE_RGBA;
++                std::array<GLint, 4> BGRA = SWIZZLE_BGRA;
++                if (PFORMAT->swizzle == RGBA)
++                    glFormat = GL_RGBA;
++                else if (PFORMAT->swizzle == BGRA)
++                    glFormat = GL_BGRA_EXT;
++                else {
++                    LOGM(Log::ERR, "Copied frame via shm might be broken or color flipped");
++                    glFormat = GL_RGBA;
++                }
++            }
++        }
++
++        glReadPixels(0, 0, m_bufferSize.x, m_bufferSize.y, glFormat, PFORMAT->glType, bufData);
++
++        g_pHyprOpenGL->m_renderData.pMonitor.reset();
++
++        m_pendingFrame.buffer->endDataPtr();
++        outFB.unbind();
++        glPixelStorei(GL_PACK_ALIGNMENT, 4);
++        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++
++        m_pendingFrame.callback(RESULT_COPIED);
++    } else {
++        LOGM(Log::ERR, "Can't copy: invalid buffer type");
++        return false;
++    }
++
++    m_pendingFrame.pending = false;
++    m_constraintsChanged   = false;
++    return true;
++}
++
++DRMFormat CCursorshareSession::format() const {
++    return m_format;
++}
++
++Vector2D CCursorshareSession::bufferSize() const {
++    return m_bufferSize;
++}
++
++Vector2D CCursorshareSession::hotspot() const {
++    return m_hotspot;
++}
+diff --git a/src/managers/screenshare/ScreenshareFrame.cpp b/src/managers/screenshare/ScreenshareFrame.cpp
+new file mode 100644
+index 00000000000..73ccf95863e
+--- /dev/null
++++ b/src/managers/screenshare/ScreenshareFrame.cpp
+@@ -0,0 +1,493 @@
++#include "ScreenshareManager.hpp"
++#include "../PointerManager.hpp"
++#include "../input/InputManager.hpp"
++#include "../permissions/DynamicPermissionManager.hpp"
++#include "../../protocols/ColorManagement.hpp"
++#include "../../protocols/XDGShell.hpp"
++#include "../../Compositor.hpp"
++#include "../../render/Renderer.hpp"
++#include "../../render/OpenGL.hpp"
++#include "../../helpers/Monitor.hpp"
++#include "../../desktop/view/Window.hpp"
++#include "../../desktop/state/FocusState.hpp"
++
++using namespace Screenshare;
++
++CScreenshareFrame::CScreenshareFrame(WP<CScreenshareSession> session, bool overlayCursor, bool isFirst) :
++    m_session(session), m_bufferSize(m_session->bufferSize()), m_overlayCursor(overlayCursor), m_isFirst(isFirst) {
++    ;
++}
++
++CScreenshareFrame::~CScreenshareFrame() {
++    if (m_failed || !m_shared)
++        return;
++
++    if (!m_copied && m_callback)
++        m_callback(RESULT_NOT_COPIED);
++}
++
++bool CScreenshareFrame::done() const {
++    if (m_session.expired() || m_session->m_stopped)
++        return true;
++
++    if (m_session->m_type == SHARE_NONE || m_bufferSize == Vector2D(0, 0))
++        return true;
++
++    if (m_failed || m_copied)
++        return true;
++
++    if (m_session->m_type == SHARE_MONITOR && !m_session->monitor())
++        return true;
++
++    if (m_session->m_type == SHARE_REGION && !m_session->monitor())
++        return true;
++
++    if (m_session->m_type == SHARE_WINDOW && (!m_session->monitor() || !validMapped(m_session->m_window)))
++        return true;
++
++    if (!m_shared)
++        return false;
++
++    if (!m_buffer || !m_buffer->m_resource || !m_buffer->m_resource->good())
++        return true;
++
++    if (!m_callback)
++        return true;
++
++    return false;
++}
++
++eScreenshareError CScreenshareFrame::share(SP<IHLBuffer> buffer, const CRegion& clientDamage, FScreenshareCallback callback) {
++    if UNLIKELY (done())
++        return ERROR_STOPPED;
++
++    if UNLIKELY (!m_session->monitor() || !g_pCompositor->monitorExists(m_session->monitor())) {
++        LOGM(Log::ERR, "Client requested sharing of a monitor that is gone");
++        m_failed = true;
++        return ERROR_STOPPED;
++    }
++
++    if UNLIKELY (m_session->m_type == SHARE_WINDOW && !validMapped(m_session->m_window)) {
++        LOGM(Log::ERR, "Client requested sharing of window that is gone or not shareable!");
++        m_failed = true;
++        return ERROR_STOPPED;
++    }
++
++    if UNLIKELY (!buffer || !buffer->m_resource || !buffer->m_resource->good()) {
++        LOGM(Log::ERR, "Client requested sharing to an invalid buffer");
++        return ERROR_NO_BUFFER;
++    }
++
++    if UNLIKELY (buffer->size != m_bufferSize) {
++        LOGM(Log::ERR, "Client requested sharing to an invalid buffer size");
++        return ERROR_BUFFER_SIZE;
++    }
++
++    uint32_t bufFormat;
++    if (buffer->dmabuf().success)
++        bufFormat = buffer->dmabuf().format;
++    else if (buffer->shm().success)
++        bufFormat = buffer->shm().format;
++    else {
++        LOGM(Log::ERR, "Client requested sharing to an invalid buffer");
++        return ERROR_NO_BUFFER;
++    }
++
++    if (std::ranges::count_if(m_session->allowedFormats(), [&](const DRMFormat& format) { return format == bufFormat; }) == 0) {
++        LOGM(Log::ERR, "Invalid format {} in {:x}", bufFormat, (uintptr_t)this);
++        return ERROR_BUFFER_FORMAT;
++    }
++
++    m_buffer   = buffer;
++    m_callback = callback;
++    m_shared   = true;
++
++    // schedule a frame so that when a screenshare starts it isn't black until the output is updated
++    if (m_isFirst) {
++        g_pCompositor->scheduleFrameForMonitor(m_session->monitor(), Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
++        g_pHyprRenderer->damageMonitor(m_session->monitor());
++    }
++
++    // TODO: add a damage ring for output damage since last shared frame
++    CRegion frameDamage = CRegion(0, 0, m_bufferSize.x, m_bufferSize.y);
++
++    // copy everything on the first frame
++    if (m_isFirst)
++        m_damage = CRegion(0, 0, m_bufferSize.x, m_bufferSize.y);
++    else
++        m_damage = frameDamage.add(clientDamage);
++
++    m_damage.intersect(0, 0, m_bufferSize.x, m_bufferSize.y);
++
++    return ERROR_NONE;
++}
++
++void CScreenshareFrame::copy() {
++    if (done())
++        return;
++
++    // tell client to send presented timestamp
++    // TODO: is this right? this is right after we commit to aq, not when page flip happens..
++    m_callback(RESULT_TIMESTAMP);
++
++    // store a snapshot before the permission popup so we don't break screenshots
++    const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_session->m_client, PERMISSION_TYPE_SCREENCOPY);
++    if (PERM == PERMISSION_RULE_ALLOW_MODE_PENDING) {
++        if (!m_session->m_tempFB.isAllocated())
++            storeTempFB();
++
++        // don't copy a frame while allow is pending because screenshot tools will only take the first frame we give, which is empty
++        return;
++    }
++
++    if (m_buffer->shm().success)
++        m_failed = !copyShm();
++    else if (m_buffer->dmabuf().success)
++        m_failed = !copyDmabuf();
++
++    if (!m_failed) {
++        // screensharing has started again
++        m_session->screenshareEvents(true);
++        m_session->m_shareStopTimer->updateTimeout(std::chrono::milliseconds(500)); // check in half second
++    } else
++        m_callback(RESULT_NOT_COPIED);
++}
++
++void CScreenshareFrame::renderMonitor() {
++    if ((m_session->m_type != SHARE_MONITOR && m_session->m_type != SHARE_REGION) || done())
++        return;
++
++    const auto PMONITOR = m_session->monitor();
++
++    auto       TEXTURE = makeShared<CTexture>(PMONITOR->m_output->state->state().buffer);
++
++    const bool IS_CM_AWARE                      = PROTO::colorManagement && PROTO::colorManagement->isClientCMAware(m_session->m_client);
++    g_pHyprOpenGL->m_renderData.transformDamage = false;
++    g_pHyprOpenGL->m_renderData.noSimplify      = true;
++
++    // render monitor texture
++    CBox monbox = CBox{{}, PMONITOR->m_pixelSize}
++                      .transform(Math::wlTransformToHyprutils(Math::invertTransform(PMONITOR->m_transform)), PMONITOR->m_pixelSize.x, PMONITOR->m_pixelSize.y)
++                      .translate(-m_session->m_captureBox.pos()); // vvvv kinda ass-backwards but that's how I designed the renderer... sigh.
++    g_pHyprOpenGL->pushMonitorTransformEnabled(true);
++    g_pHyprOpenGL->setRenderModifEnabled(false);
++    g_pHyprOpenGL->renderTexture(TEXTURE, monbox,
++                                 {
++                                     .cmBackToSRGB       = !IS_CM_AWARE,
++                                     .cmBackToSRGBSource = !IS_CM_AWARE ? PMONITOR : nullptr,
++                                 });
++    g_pHyprOpenGL->setRenderModifEnabled(true);
++    g_pHyprOpenGL->popMonitorTransformEnabled();
++
++    // render black boxes for noscreenshare
++    auto hidePopups = [&](Vector2D popupBaseOffset) {
++        return [&, popupBaseOffset](WP<Desktop::View::CPopup> popup, void*) {
++            if (!popup->wlSurface() || !popup->wlSurface()->resource() || !popup->visible())
++                return;
++
++            const auto popRel = popup->coordsRelativeToParent();
++            popup->wlSurface()->resource()->breadthfirst(
++                [&](SP<CWLSurfaceResource> surf, const Vector2D& localOff, void*) {
++                    const auto size = surf->m_current.size;
++                    const auto surfBox =
++                        CBox{popupBaseOffset + popRel + localOff, size}.translate(PMONITOR->m_position).scale(PMONITOR->m_scale).translate(-m_session->m_captureBox.pos());
++
++                    if LIKELY (surfBox.w > 0 && surfBox.h > 0)
++                        g_pHyprOpenGL->renderRect(surfBox, Colors::BLACK, {});
++                },
++                nullptr);
++        };
++    };
++
++    for (auto const& l : g_pCompositor->m_layers) {
++        if (!l->m_ruleApplicator->noScreenShare().valueOrDefault())
++            continue;
++
++        if UNLIKELY (!l->visible())
++            continue;
++
++        const auto REALPOS  = l->m_realPosition->value();
++        const auto REALSIZE = l->m_realSize->value();
++
++        const auto noScreenShareBox = CBox{REALPOS.x, REALPOS.y, std::max(REALSIZE.x, 5.0), std::max(REALSIZE.y, 5.0)}
++                                          .translate(-PMONITOR->m_position)
++                                          .scale(PMONITOR->m_scale)
++                                          .translate(-m_session->m_captureBox.pos());
++
++        g_pHyprOpenGL->renderRect(noScreenShareBox, Colors::BLACK, {});
++
++        const auto     geom            = l->m_geometry;
++        const Vector2D popupBaseOffset = REALPOS - Vector2D{geom.pos().x, geom.pos().y};
++        if (l->m_popupHead)
++            l->m_popupHead->breadthfirst(hidePopups(popupBaseOffset), nullptr);
++    }
++
++    for (auto const& w : g_pCompositor->m_windows) {
++        if (!w->m_ruleApplicator->noScreenShare().valueOrDefault())
++            continue;
++
++        if (!g_pHyprRenderer->shouldRenderWindow(w, PMONITOR))
++            continue;
++
++        if (w->isHidden())
++            continue;
++
++        const auto PWORKSPACE = w->m_workspace;
++
++        if UNLIKELY (!PWORKSPACE && !w->m_fadingOut && w->m_alpha->value() != 0.f)
++            continue;
++
++        const auto renderOffset     = PWORKSPACE && !w->m_pinned ? PWORKSPACE->m_renderOffset->value() : Vector2D{};
++        const auto REALPOS          = w->m_realPosition->value() + renderOffset;
++        const auto noScreenShareBox = CBox{REALPOS.x, REALPOS.y, std::max(w->m_realSize->value().x, 5.0), std::max(w->m_realSize->value().y, 5.0)}
++                                          .translate(-PMONITOR->m_position)
++                                          .scale(PMONITOR->m_scale)
++                                          .translate(-m_session->m_captureBox.pos());
++
++        // seems like rounding doesn't play well with how we manipulate the box position to render regions causing the window to leak through
++        const auto dontRound     = m_session->m_captureBox.pos() != Vector2D() || w->isEffectiveInternalFSMode(FSMODE_FULLSCREEN);
++        const auto rounding      = dontRound ? 0 : w->rounding() * PMONITOR->m_scale;
++        const auto roundingPower = dontRound ? 2.0f : w->roundingPower();
++
++        g_pHyprOpenGL->renderRect(noScreenShareBox, Colors::BLACK, {.round = rounding, .roundingPower = roundingPower});
++
++        if (w->m_isX11 || !w->m_popupHead)
++            continue;
++
++        const auto     geom            = w->m_xdgSurface->m_current.geometry;
++        const Vector2D popupBaseOffset = REALPOS - Vector2D{geom.pos().x, geom.pos().y};
++
++        w->m_popupHead->breadthfirst(hidePopups(popupBaseOffset), nullptr);
++    }
++
++    if (m_overlayCursor) {
++        CRegion  fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
++        Vector2D cursorPos  = g_pInputManager->getMouseCoordsInternal() - PMONITOR->m_position - m_session->m_captureBox.pos() / PMONITOR->m_scale;
++        g_pPointerManager->renderSoftwareCursorsFor(PMONITOR, Time::steadyNow(), fakeDamage, cursorPos, true);
++    }
++}
++
++void CScreenshareFrame::renderWindow() {
++    if (m_session->m_type != SHARE_WINDOW || done())
++        return;
++
++    const auto PWINDOW  = m_session->m_window.lock();
++    const auto PMONITOR = m_session->monitor();
++
++    const auto NOW = Time::steadyNow();
++
++    // TODO: implement a monitor independent render mode to buffer that does this in CHyprRenderer::begin() or something like that
++    g_pHyprOpenGL->m_renderData.monitorProjection = Mat3x3::identity();
++    g_pHyprOpenGL->m_renderData.projection        = Mat3x3::outputProjection(m_bufferSize, HYPRUTILS_TRANSFORM_NORMAL);
++    g_pHyprOpenGL->m_renderData.transformDamage   = false;
++    g_pHyprOpenGL->setViewport(0, 0, m_bufferSize.x, m_bufferSize.y);
++
++    g_pHyprRenderer->m_bBlockSurfaceFeedback = g_pHyprRenderer->shouldRenderWindow(PWINDOW); // block the feedback to avoid spamming the surface if it's visible
++    g_pHyprRenderer->renderWindow(PWINDOW, PMONITOR, NOW, false, RENDER_PASS_ALL, true, true);
++    g_pHyprRenderer->m_bBlockSurfaceFeedback = false;
++
++    if (!m_overlayCursor)
++        return;
++
++    auto pointerSurfaceResource = g_pSeatManager->m_state.pointerFocus.lock();
++
++    if (!pointerSurfaceResource)
++        return;
++
++    auto pointerSurface = Desktop::View::CWLSurface::fromResource(pointerSurfaceResource);
++
++    if (!pointerSurface || pointerSurface->getSurfaceBoxGlobal()->intersection(m_session->m_window->getFullWindowBoundingBox()).empty())
++        return;
++
++    if (Desktop::focusState()->window() != m_session->m_window)
++        return;
++
++    CRegion fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
++    g_pPointerManager->renderSoftwareCursorsFor(PMONITOR->m_self.lock(), NOW, fakeDamage, g_pInputManager->getMouseCoordsInternal() - PWINDOW->m_realPosition->value(), true);
++}
++
++void CScreenshareFrame::render() {
++    const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_session->m_client, PERMISSION_TYPE_SCREENCOPY);
++
++    if (PERM == PERMISSION_RULE_ALLOW_MODE_PENDING) {
++        g_pHyprOpenGL->clear(CHyprColor(0, 0, 0, 0));
++        return;
++    }
++
++    bool windowShareDenied = m_session->m_type == SHARE_WINDOW && m_session->m_window->m_ruleApplicator && m_session->m_window->m_ruleApplicator->noScreenShare().valueOrDefault();
++    if (PERM == PERMISSION_RULE_ALLOW_MODE_DENY || windowShareDenied) {
++        g_pHyprOpenGL->clear(CHyprColor(0, 0, 0, 0));
++        CBox texbox = CBox{m_bufferSize / 2.F, g_pHyprOpenGL->m_screencopyDeniedTexture->m_size}.translate(-g_pHyprOpenGL->m_screencopyDeniedTexture->m_size / 2.F);
++        g_pHyprOpenGL->renderTexture(g_pHyprOpenGL->m_screencopyDeniedTexture, texbox, {});
++        return;
++    }
++
++    if (m_session->m_tempFB.isAllocated()) {
++        CBox texbox = {{}, m_bufferSize};
++        g_pHyprOpenGL->renderTexture(m_session->m_tempFB.getTexture(), texbox, {});
++        m_session->m_tempFB.release();
++        return;
++    }
++
++    switch (m_session->m_type) {
++        case SHARE_REGION: // TODO: could this be better? this is how screencopy works
++        case SHARE_MONITOR: renderMonitor(); break;
++        case SHARE_WINDOW: renderWindow(); break;
++        case SHARE_NONE:
++        default: return;
++    }
++}
++
++bool CScreenshareFrame::copyDmabuf() {
++    if (done())
++        return false;
++
++    if (!g_pHyprRenderer->beginRender(m_session->monitor(), m_damage, RENDER_MODE_TO_BUFFER, m_buffer, nullptr, true)) {
++        LOGM(Log::ERR, "Can't copy: failed to begin rendering to dma frame");
++        return false;
++    }
++
++    render();
++
++    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
++
++    g_pHyprRenderer->endRender([self = m_self]() {
++        if (!self || self.expired() || self->m_copied)
++            return;
++
++        LOGM(Log::TRACE, "Copied frame via dma");
++        self->m_callback(RESULT_COPIED);
++        self->m_copied = true;
++    });
++
++    return true;
++}
++
++bool CScreenshareFrame::copyShm() {
++    if (done())
++        return false;
++
++    g_pHyprRenderer->makeEGLCurrent();
++
++    auto shm                      = m_buffer->shm();
++    auto [pixelData, fmt, bufLen] = m_buffer->beginDataPtr(0); // no need for end, cuz it's shm
++
++    const auto PFORMAT = NFormatUtils::getPixelFormatFromDRM(shm.format);
++    if (!PFORMAT) {
++        LOGM(Log::ERR, "Can't copy: failed to find a pixel format");
++        return false;
++    }
++
++    const auto   PMONITOR = m_session->monitor();
++
++    CFramebuffer outFB;
++    outFB.alloc(m_bufferSize.x, m_bufferSize.y, shm.format);
++
++    if (!g_pHyprRenderer->beginRender(PMONITOR, m_damage, RENDER_MODE_FULL_FAKE, nullptr, &outFB, true)) {
++        LOGM(Log::ERR, "Can't copy: failed to begin rendering");
++        return false;
++    }
++
++    render();
++
++    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
++
++    g_pHyprRenderer->endRender();
++
++    g_pHyprOpenGL->m_renderData.pMonitor = PMONITOR;
++    outFB.bind();
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, outFB.getFBID());
++
++    glPixelStorei(GL_PACK_ALIGNMENT, 1);
++
++    uint32_t packStride = NFormatUtils::minStride(PFORMAT, m_bufferSize.x);
++    int      glFormat   = PFORMAT->glFormat;
++
++    if (glFormat == GL_RGBA)
++        glFormat = GL_BGRA_EXT;
++
++    if (glFormat != GL_BGRA_EXT && glFormat != GL_RGB) {
++        if (PFORMAT->swizzle.has_value()) {
++            std::array<GLint, 4> RGBA = SWIZZLE_RGBA;
++            std::array<GLint, 4> BGRA = SWIZZLE_BGRA;
++            if (PFORMAT->swizzle == RGBA)
++                glFormat = GL_RGBA;
++            else if (PFORMAT->swizzle == BGRA)
++                glFormat = GL_BGRA_EXT;
++            else {
++                LOGM(Log::ERR, "Copied frame via shm might be broken or color flipped");
++                glFormat = GL_RGBA;
++            }
++        }
++    }
++
++    // TODO: use pixel buffer object to not block cpu
++    if (packStride == sc<uint32_t>(shm.stride)) {
++        m_damage.forEachRect([&](const auto& rect) {
++            int width  = rect.x2 - rect.x1;
++            int height = rect.y2 - rect.y1;
++            glReadPixels(rect.x1, rect.y1, width, height, glFormat, PFORMAT->glType, pixelData);
++        });
++    } else {
++        m_damage.forEachRect([&](const auto& rect) {
++            size_t width  = rect.x2 - rect.x1;
++            size_t height = rect.y2 - rect.y1;
++            for (size_t i = rect.y1; i < height; ++i) {
++                glReadPixels(rect.x1, i, width, 1, glFormat, PFORMAT->glType, pixelData + (rect.x1 * PFORMAT->bytesPerBlock) + (i * shm.stride));
++            }
++        });
++    }
++
++    outFB.unbind();
++    glPixelStorei(GL_PACK_ALIGNMENT, 4);
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++
++    g_pHyprOpenGL->m_renderData.pMonitor.reset();
++
++    if (!m_copied) {
++        LOGM(Log::TRACE, "Copied frame via shm");
++        m_callback(RESULT_COPIED);
++    }
++
++    return true;
++}
++
++void CScreenshareFrame::storeTempFB() {
++    g_pHyprRenderer->makeEGLCurrent();
++
++    m_session->m_tempFB.alloc(m_bufferSize.x, m_bufferSize.y);
++
++    CRegion fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
++
++    if (!g_pHyprRenderer->beginRender(m_session->monitor(), fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &m_session->m_tempFB, true)) {
++        LOGM(Log::ERR, "Can't copy: failed to begin rendering to temp fb");
++        return;
++    }
++
++    switch (m_session->m_type) {
++        case SHARE_REGION: // TODO: could this be better? this is how screencopy works
++        case SHARE_MONITOR: renderMonitor(); break;
++        case SHARE_WINDOW: renderWindow(); break;
++        case SHARE_NONE:
++        default: return;
++    }
++
++    g_pHyprRenderer->endRender();
++}
++
++Vector2D CScreenshareFrame::bufferSize() const {
++    return m_bufferSize;
++}
++
++wl_output_transform CScreenshareFrame::transform() const {
++    switch (m_session->m_type) {
++        case SHARE_REGION:
++        case SHARE_MONITOR: return m_session->monitor()->m_transform;
++        default:
++        case SHARE_WINDOW: return WL_OUTPUT_TRANSFORM_NORMAL;
++    }
++}
++
++const CRegion& CScreenshareFrame::damage() const {
++    return m_damage;
++}
+diff --git a/src/managers/screenshare/ScreenshareManager.cpp b/src/managers/screenshare/ScreenshareManager.cpp
+new file mode 100644
+index 00000000000..823e99b3a08
+--- /dev/null
++++ b/src/managers/screenshare/ScreenshareManager.cpp
+@@ -0,0 +1,161 @@
++#include "ScreenshareManager.hpp"
++#include "../../render/Renderer.hpp"
++#include "../../Compositor.hpp"
++#include "../../desktop/view/Window.hpp"
++#include "../../protocols/core/Seat.hpp"
++
++using namespace Screenshare;
++
++CScreenshareManager::CScreenshareManager() {
++    ;
++}
++
++void CScreenshareManager::onOutputCommit(PHLMONITOR monitor) {
++    std::erase_if(m_sessions, [&](const WP<CScreenshareSession>& session) { return session.expired(); });
++
++    // if no pending frames, and no sessions are sharing, then unblock ds
++    if (m_pendingFrames.empty()) {
++        for (const auto& session : m_sessions) {
++            if (!session->m_stopped && session->m_sharing)
++                return;
++        }
++
++        g_pHyprRenderer->m_directScanoutBlocked = false;
++        return; // nothing to share
++    }
++
++    std::ranges::for_each(m_pendingFrames, [&](WP<CScreenshareFrame>& frame) {
++        if (frame.expired() || !frame->m_shared || frame->done())
++            return;
++
++        if (frame->m_session->monitor() != monitor)
++            return;
++
++        if (frame->m_session->m_type == SHARE_WINDOW) {
++            CBox geometry = {frame->m_session->m_window->m_realPosition->value(), frame->m_session->m_window->m_realSize->value()};
++            if (geometry.intersection({monitor->m_position, monitor->m_size}).empty())
++                return;
++        }
++
++        frame->copy();
++    });
++
++    std::erase_if(m_pendingFrames, [&](const WP<CScreenshareFrame>& frame) { return frame.expired(); });
++}
++
++UP<CScreenshareSession> CScreenshareManager::newSession(wl_client* client, PHLMONITOR monitor) {
++    if UNLIKELY (!monitor || !g_pCompositor->monitorExists(monitor)) {
++        LOGM(Log::ERR, "Client requested sharing of a monitor that is gone");
++        return nullptr;
++    }
++
++    UP<CScreenshareSession> session = UP<CScreenshareSession>(new CScreenshareSession(monitor, client));
++
++    session->m_self = session;
++    m_sessions.emplace_back(session);
++
++    return session;
++}
++
++UP<CScreenshareSession> CScreenshareManager::newSession(wl_client* client, PHLMONITOR monitor, CBox captureRegion) {
++    if UNLIKELY (!monitor || !g_pCompositor->monitorExists(monitor)) {
++        LOGM(Log::ERR, "Client requested sharing of a monitor that is gone");
++        return nullptr;
++    }
++
++    UP<CScreenshareSession> session = UP<CScreenshareSession>(new CScreenshareSession(monitor, captureRegion, client));
++
++    session->m_self = session;
++    m_sessions.emplace_back(session);
++
++    return session;
++}
++
++UP<CScreenshareSession> CScreenshareManager::newSession(wl_client* client, PHLWINDOW window) {
++    if UNLIKELY (!window || !window->m_isMapped) {
++        LOGM(Log::ERR, "Client requested sharing of window that is gone or not shareable!");
++        return nullptr;
++    }
++
++    UP<CScreenshareSession> session = UP<CScreenshareSession>(new CScreenshareSession(window, client));
++
++    session->m_self = session;
++    m_sessions.emplace_back(session);
++
++    return session;
++}
++
++UP<CCursorshareSession> CScreenshareManager::newCursorSession(wl_client* client, WP<CWLPointerResource> pointer) {
++    UP<CCursorshareSession> session = UP<CCursorshareSession>(new CCursorshareSession(client, pointer));
++
++    session->m_self = session;
++    m_cursorSessions.emplace_back(session);
++
++    return session;
++}
++
++WP<CScreenshareSession> CScreenshareManager::getManagedSession(wl_client* client, PHLMONITOR monitor) {
++    return getManagedSession(SHARE_MONITOR, client, monitor, nullptr, {});
++}
++
++WP<CScreenshareSession> CScreenshareManager::getManagedSession(wl_client* client, PHLMONITOR monitor, CBox captureBox) {
++
++    return getManagedSession(SHARE_REGION, client, monitor, nullptr, captureBox);
++}
++
++WP<CScreenshareSession> CScreenshareManager::getManagedSession(wl_client* client, PHLWINDOW window) {
++    return getManagedSession(SHARE_WINDOW, client, nullptr, window, {});
++}
++
++WP<CScreenshareSession> CScreenshareManager::getManagedSession(eScreenshareType type, wl_client* client, PHLMONITOR monitor, PHLWINDOW window, CBox captureBox) {
++    if (type == SHARE_NONE)
++        return {};
++
++    auto it = std::ranges::find_if(m_managedSessions, [&](const auto& session) {
++        if (session->m_session->m_client != client || session->m_session->m_type != type)
++            return false;
++
++        switch (type) {
++            case SHARE_MONITOR: return session->m_session->m_monitor == monitor;
++            case SHARE_WINDOW: return session->m_session->m_window == window;
++            case SHARE_REGION: return session->m_session->m_monitor == monitor && session->m_session->m_captureBox == captureBox;
++            case SHARE_NONE:
++            default: return false;
++        }
++
++        return false;
++    });
++
++    if (it == m_managedSessions.end()) {
++        UP<CScreenshareSession> session;
++        switch (type) {
++            case SHARE_MONITOR: session = UP<CScreenshareSession>(new CScreenshareSession(monitor, client)); break;
++            case SHARE_WINDOW: session = UP<CScreenshareSession>(new CScreenshareSession(window, client)); break;
++            case SHARE_REGION: session = UP<CScreenshareSession>(new CScreenshareSession(monitor, captureBox, client)); break;
++            case SHARE_NONE:
++            default: return {};
++        }
++
++        session->m_self = session;
++        m_sessions.emplace_back(session);
++
++        it = m_managedSessions.emplace(m_managedSessions.end(), makeUnique<SManagedSession>(std::move(session)));
++    }
++
++    auto& session = *it;
++
++    session->stoppedListener = session->m_session->m_events.stopped.listen([session = WP<SManagedSession>(session)]() {
++        std::erase_if(Screenshare::mgr()->m_managedSessions, [&](const auto& s) { return !s || session.expired() || s->m_session == session->m_session; });
++    });
++
++    return session->m_session;
++}
++
++void CScreenshareManager::destroyClientSessions(wl_client* client) {
++    LOGM(Log::TRACE, "Destroy client sessions for {:x}", (uintptr_t)client);
++    std::erase_if(m_managedSessions, [&](const auto& session) { return !session || session->m_session->m_client == client; });
++}
++
++CScreenshareManager::SManagedSession::SManagedSession(UP<CScreenshareSession>&& session) : m_session(std::move(session)) {
++    ;
++}
+diff --git a/src/managers/screenshare/ScreenshareManager.hpp b/src/managers/screenshare/ScreenshareManager.hpp
+new file mode 100644
+index 00000000000..4c61a7b07c1
+--- /dev/null
++++ b/src/managers/screenshare/ScreenshareManager.hpp
+@@ -0,0 +1,252 @@
++#pragma once
++
++#include <vector>
++#include "../../helpers/memory/Memory.hpp"
++#include "../../protocols/types/Buffer.hpp"
++#include "../../render/Framebuffer.hpp"
++#include "../eventLoop/EventLoopTimer.hpp"
++#include "../../render/Renderer.hpp"
++
++// TODO: do screenshare damage
++
++class CWLPointerResource;
++
++namespace Screenshare {
++    enum eScreenshareType : uint8_t {
++        SHARE_MONITOR,
++        SHARE_WINDOW,
++        SHARE_REGION,
++        SHARE_NONE
++    };
++
++    enum eScreenshareError : uint8_t {
++        ERROR_NONE,
++        ERROR_UNKNOWN,
++        ERROR_STOPPED,
++        ERROR_NO_BUFFER,
++        ERROR_BUFFER_SIZE,
++        ERROR_BUFFER_FORMAT
++    };
++
++    enum eScreenshareResult : uint8_t {
++        RESULT_COPIED,
++        RESULT_NOT_COPIED,
++        RESULT_TIMESTAMP,
++    };
++
++    using FScreenshareCallback = std::function<void(eScreenshareResult result)>;
++    using FSourceBoxCallback   = std::function<CBox(void)>;
++
++    class CScreenshareSession {
++      public:
++        CScreenshareSession(const CScreenshareSession&) = delete;
++        CScreenshareSession(CScreenshareSession&&)      = delete;
++        ~CScreenshareSession();
++
++        UP<CScreenshareFrame> nextFrame(bool overlayCursor);
++        void                  stop();
++
++        // constraints
++        const std::vector<DRMFormat>& allowedFormats() const;
++        Vector2D                      bufferSize() const;
++        PHLMONITOR                    monitor() const; // this will return the correct monitor based on type
++
++        struct {
++            CSignalT<> stopped;
++            CSignalT<> constraintsChanged;
++        } m_events;
++
++      private:
++        CScreenshareSession(PHLMONITOR monitor, wl_client* client);
++        CScreenshareSession(PHLMONITOR monitor, CBox captureRegion, wl_client* client);
++        CScreenshareSession(PHLWINDOW window, wl_client* client);
++
++        WP<CScreenshareSession> m_self;
++        bool                    m_stopped = false;
++
++        eScreenshareType        m_type = SHARE_NONE;
++        PHLMONITORREF           m_monitor;
++        PHLWINDOWREF            m_window;
++        CBox                    m_captureBox = {}; // given capture area in logical coordinates (see xdg_output)
++
++        wl_client*              m_client = nullptr;
++        std::string             m_name   = "";
++
++        std::vector<DRMFormat>  m_formats;
++        Vector2D                m_bufferSize = Vector2D(0, 0);
++
++        CFramebuffer            m_tempFB;
++
++        SP<CEventLoopTimer>     m_shareStopTimer;
++        bool                    m_sharing = false;
++
++        struct {
++            CHyprSignalListener monitorDestroyed;
++            CHyprSignalListener monitorModeChanged;
++            CHyprSignalListener windowDestroyed;
++            CHyprSignalListener windowSizeChanged;
++            CHyprSignalListener windowMonitorChanged;
++        } m_listeners;
++
++        void screenshareEvents(bool started);
++        void calculateConstraints();
++        void init();
++
++        friend class CScreenshareFrame;
++        friend class CScreenshareManager;
++    };
++
++    class CCursorshareSession {
++      public:
++        CCursorshareSession(const CCursorshareSession&) = delete;
++        CCursorshareSession(CCursorshareSession&&)      = delete;
++        ~CCursorshareSession();
++
++        eScreenshareError share(PHLMONITOR monitor, SP<IHLBuffer> buffer, FSourceBoxCallback sourceBoxCallback, FScreenshareCallback callback);
++        void              stop();
++
++        // constraints
++        DRMFormat format() const;
++        Vector2D  bufferSize() const;
++        Vector2D  hotspot() const;
++
++        struct {
++            CSignalT<> stopped;
++            CSignalT<> constraintsChanged;
++        } m_events;
++
++      private:
++        CCursorshareSession(wl_client* client, WP<CWLPointerResource> pointer);
++
++        WP<CCursorshareSession> m_self;
++        bool                    m_stopped            = false;
++        bool                    m_constraintsChanged = true;
++
++        wl_client*              m_client = nullptr;
++        WP<CWLPointerResource>  m_pointer;
++
++        // constraints
++        DRMFormat m_format     = 0 /* DRM_FORMAT_INVALID */;
++        Vector2D  m_hotspot    = Vector2D(0, 0);
++        Vector2D  m_bufferSize = Vector2D(0, 0);
++
++        struct {
++            bool                 pending = false;
++            PHLMONITOR           monitor;
++            SP<IHLBuffer>        buffer;
++            FSourceBoxCallback   sourceBoxCallback;
++            FScreenshareCallback callback;
++        } m_pendingFrame;
++
++        struct {
++            CHyprSignalListener pointerDestroyed;
++            CHyprSignalListener cursorChanged;
++        } m_listeners;
++
++        bool copy();
++        void render();
++        void calculateConstraints();
++
++        friend class CScreenshareFrame;
++        friend class CScreenshareManager;
++    };
++
++    class CScreenshareFrame {
++      public:
++        CScreenshareFrame(const CScreenshareFrame&) = delete;
++        CScreenshareFrame(CScreenshareFrame&&)      = delete;
++        CScreenshareFrame(WP<CScreenshareSession> session, bool overlayCursor, bool isFirst);
++        ~CScreenshareFrame();
++
++        bool                done() const;
++        eScreenshareError   share(SP<IHLBuffer> buffer, const CRegion& damage, FScreenshareCallback callback);
++
++        Vector2D            bufferSize() const;
++        wl_output_transform transform() const; // returns the transform applied by compositor on the buffer
++        const CRegion&      damage() const;
++
++      private:
++        WP<CScreenshareFrame>   m_self;
++        WP<CScreenshareSession> m_session;
++        FScreenshareCallback    m_callback;
++        SP<IHLBuffer>           m_buffer;
++        Vector2D                m_bufferSize = Vector2D(0, 0);
++        CRegion                 m_damage; // damage in buffer coords
++        bool                    m_shared = false, m_copied = false, m_failed = false;
++        bool                    m_overlayCursor = true;
++        bool                    m_isFirst       = false;
++
++        //
++        void copy();
++        bool copyDmabuf();
++        bool copyShm();
++
++        void render();
++        void renderMonitor();
++        void renderMonitorRegion();
++        void renderWindow();
++
++        void storeTempFB();
++
++        friend class CScreenshareManager;
++        friend class CScreenshareSession;
++    };
++
++    class CScreenshareManager {
++      public:
++        CScreenshareManager();
++
++        UP<CScreenshareSession> newSession(wl_client* client, PHLMONITOR monitor);
++        UP<CScreenshareSession> newSession(wl_client* client, PHLMONITOR monitor, CBox captureRegion);
++        UP<CScreenshareSession> newSession(wl_client* client, PHLWINDOW window);
++
++        WP<CScreenshareSession> getManagedSession(wl_client* client, PHLMONITOR monitor);
++        WP<CScreenshareSession> getManagedSession(wl_client* client, PHLMONITOR monitor, CBox captureBox);
++        WP<CScreenshareSession> getManagedSession(wl_client* client, PHLWINDOW window);
++
++        UP<CCursorshareSession> newCursorSession(wl_client* client, WP<CWLPointerResource> pointer);
++
++        void                    destroyClientSessions(wl_client* client);
++
++        void                    onOutputCommit(PHLMONITOR monitor);
++
++      private:
++        std::vector<WP<CScreenshareSession>> m_sessions;
++        std::vector<WP<CCursorshareSession>> m_cursorSessions;
++        std::vector<WP<CScreenshareFrame>>   m_pendingFrames;
++
++        struct SManagedSession {
++            SManagedSession(UP<CScreenshareSession>&& session);
++
++            UP<CScreenshareSession> m_session;
++            CHyprSignalListener     stoppedListener;
++        };
++
++        std::vector<UP<SManagedSession>> m_managedSessions;
++        WP<CScreenshareSession>          getManagedSession(eScreenshareType type, wl_client* client, PHLMONITOR monitor, PHLWINDOW window, CBox captureBox);
++
++        friend class CScreenshareSession;
++    };
++
++    inline UP<CScreenshareManager>& mgr() {
++        static UP<CScreenshareManager> manager = nullptr;
++        if (!manager && g_pHyprRenderer) {
++            Log::logger->log(Log::DEBUG, "Starting ScreenshareManager");
++            manager = makeUnique<CScreenshareManager>();
++        }
++        return manager;
++    }
++}
++
++template <>
++struct std::formatter<Screenshare::eScreenshareType> : std::formatter<std::string> {
++    auto format(const Screenshare::eScreenshareType& res, std::format_context& ctx) const {
++        switch (res) {
++            case Screenshare::SHARE_MONITOR: return formatter<string>::format("monitor", ctx);
++            case Screenshare::SHARE_WINDOW: return formatter<string>::format("window", ctx);
++            case Screenshare::SHARE_REGION: return formatter<string>::format("region", ctx);
++            case Screenshare::SHARE_NONE: return formatter<string>::format("ERR NONE", ctx);
++        }
++        return formatter<string>::format("error", ctx);
++    }
++};
+diff --git a/src/managers/screenshare/ScreenshareSession.cpp b/src/managers/screenshare/ScreenshareSession.cpp
+new file mode 100644
+index 00000000000..83402abf26a
+--- /dev/null
++++ b/src/managers/screenshare/ScreenshareSession.cpp
+@@ -0,0 +1,162 @@
++#include "ScreenshareManager.hpp"
++#include "../../render/OpenGL.hpp"
++#include "../../Compositor.hpp"
++#include "../../render/Renderer.hpp"
++#include "../HookSystemManager.hpp"
++#include "../EventManager.hpp"
++#include "../eventLoop/EventLoopManager.hpp"
++
++using namespace Screenshare;
++
++CScreenshareSession::CScreenshareSession(PHLMONITOR monitor, wl_client* client) : m_type(SHARE_MONITOR), m_monitor(monitor), m_client(client) {
++    init();
++}
++
++CScreenshareSession::CScreenshareSession(PHLWINDOW window, wl_client* client) : m_type(SHARE_WINDOW), m_window(window), m_client(client) {
++    m_listeners.windowDestroyed      = m_window->m_events.unmap.listen([this]() { stop(); });
++    m_listeners.windowSizeChanged    = m_window->m_events.resize.listen([this]() {
++        calculateConstraints();
++        m_events.constraintsChanged.emit();
++    });
++    m_listeners.windowMonitorChanged = m_window->m_events.monitorChanged.listen([this]() {
++        m_listeners.monitorDestroyed   = monitor()->m_events.disconnect.listen([this]() { stop(); });
++        m_listeners.monitorModeChanged = monitor()->m_events.modeChanged.listen([this]() {
++            calculateConstraints();
++            m_events.constraintsChanged.emit();
++        });
++
++        calculateConstraints();
++        m_events.constraintsChanged.emit();
++    });
++
++    init();
++}
++
++CScreenshareSession::CScreenshareSession(PHLMONITOR monitor, CBox captureRegion, wl_client* client) :
++    m_type(SHARE_REGION), m_monitor(monitor), m_captureBox(captureRegion), m_client(client) {
++    init();
++}
++
++CScreenshareSession::~CScreenshareSession() {
++    stop();
++    LOGM(Log::TRACE, "Destroyed screenshare session for ({}): {}", m_type, m_name);
++}
++
++void CScreenshareSession::stop() {
++    if (m_stopped)
++        return;
++    m_stopped = true;
++    m_events.stopped.emit();
++
++    screenshareEvents(false);
++}
++
++void CScreenshareSession::init() {
++    m_shareStopTimer = makeShared<CEventLoopTimer>(
++        std::chrono::milliseconds(500),
++        [this](SP<CEventLoopTimer> self, void* data) {
++            // if this fires, then it's been half a second since the last frame, so we aren't sharing
++            screenshareEvents(false);
++        },
++        nullptr);
++
++    if (g_pEventLoopManager)
++        g_pEventLoopManager->addTimer(m_shareStopTimer);
++
++    // scale capture box since it's in logical coords
++    m_captureBox.scale(monitor()->m_scale);
++
++    m_listeners.monitorDestroyed   = monitor()->m_events.disconnect.listen([this]() { stop(); });
++    m_listeners.monitorModeChanged = monitor()->m_events.modeChanged.listen([this]() {
++        calculateConstraints();
++        m_events.constraintsChanged.emit();
++    });
++
++    calculateConstraints();
++}
++
++void CScreenshareSession::calculateConstraints() {
++    const auto PMONITOR = monitor();
++    if (!PMONITOR) {
++        stop();
++        return;
++    }
++
++    // TODO: maybe support more that just monitor format in the future?
++    m_formats.clear();
++    m_formats.push_back(NFormatUtils::alphaFormat(g_pHyprOpenGL->getPreferredReadFormat(PMONITOR)));
++    m_formats.push_back(g_pHyprOpenGL->getPreferredReadFormat(PMONITOR)); // some clients don't like alpha formats
++
++    // TODO: hack, we can't bit flip so we'll format flip heh, GL_BGRA_EXT won't work here
++    for (auto& format : m_formats) {
++        if (format == DRM_FORMAT_XRGB2101010 || format == DRM_FORMAT_ARGB2101010)
++            format = DRM_FORMAT_XBGR2101010;
++    }
++
++    switch (m_type) {
++        case SHARE_MONITOR:
++            m_bufferSize = PMONITOR->m_pixelSize;
++            m_name       = PMONITOR->m_name;
++            break;
++        case SHARE_WINDOW:
++            m_bufferSize = m_window->m_realSize->value().round();
++            m_name       = m_window->m_title;
++            break;
++        case SHARE_REGION:
++            m_bufferSize = PMONITOR->m_transform % 2 == 0 ? m_captureBox.size() : Vector2D{m_captureBox.h, m_captureBox.w};
++            m_name       = PMONITOR->m_name;
++            break;
++        case SHARE_NONE:
++        default:
++            LOGM(Log::ERR, "Invalid share type?? This shouldn't happen");
++            stop();
++            return;
++    }
++
++    LOGM(Log::TRACE, "constraints changed for {}", m_name);
++}
++
++void CScreenshareSession::screenshareEvents(bool startSharing) {
++    if (startSharing && !m_sharing) {
++        m_sharing = true;
++        EMIT_HOOK_EVENT("screencast", (std::vector<std::any>{1, m_type}));
++        g_pEventManager->postEvent(SHyprIPCEvent{.event = "screencast", .data = std::format("1,{}", m_type)});
++        EMIT_HOOK_EVENT("screencastv2", (std::vector<std::any>{1, m_type, m_name}));
++        g_pEventManager->postEvent(SHyprIPCEvent{.event = "screencastv2", .data = std::format("1,{},{}", m_type, m_name)});
++        LOGM(Log::INFO, "New screenshare session for ({}): {}", m_type, m_name);
++    } else if (!startSharing && m_sharing) {
++        m_sharing = false;
++        EMIT_HOOK_EVENT("screencast", (std::vector<std::any>{0, m_type}));
++        g_pEventManager->postEvent(SHyprIPCEvent{.event = "screencast", .data = std::format("0,{}", m_type)});
++        EMIT_HOOK_EVENT("screencastv2", (std::vector<std::any>{0, m_type, m_name}));
++        g_pEventManager->postEvent(SHyprIPCEvent{.event = "screencastv2", .data = std::format("0,{},{}", m_type, m_name)});
++        LOGM(Log::INFO, "Stopped screenshare session for ({}): {}", m_type, m_name);
++    }
++}
++
++const std::vector<DRMFormat>& CScreenshareSession::allowedFormats() const {
++    return m_formats;
++}
++
++Vector2D CScreenshareSession::bufferSize() const {
++    return m_bufferSize;
++}
++
++PHLMONITOR CScreenshareSession::monitor() const {
++    if (m_type == SHARE_WINDOW && m_window.expired())
++        return nullptr;
++    PHLMONITORREF mon = m_type == SHARE_WINDOW ? m_window->m_monitor : m_monitor;
++    return mon.expired() ? nullptr : mon.lock();
++}
++
++UP<CScreenshareFrame> CScreenshareSession::nextFrame(bool overlayCursor) {
++    UP<CScreenshareFrame> frame = makeUnique<CScreenshareFrame>(m_self, overlayCursor, !m_sharing);
++    frame->m_self               = frame;
++
++    Screenshare::mgr()->m_pendingFrames.emplace_back(frame);
++
++    // there is now a pending frame, so block ds
++    g_pHyprRenderer->m_directScanoutBlocked = true;
++
++    return frame;
++}
+diff --git a/src/protocols/ForeignToplevel.hpp b/src/protocols/ForeignToplevel.hpp
+index f0188292a0b..0ff74e75557 100644
+--- a/src/protocols/ForeignToplevel.hpp
++++ b/src/protocols/ForeignToplevel.hpp
+@@ -45,9 +45,9 @@ class CForeignToplevelList {
+ class CForeignToplevelProtocol : public IWaylandProtocol {
+   public:
+     CForeignToplevelProtocol(const wl_interface* iface, const int& ver, const std::string& name);
+-    PHLWINDOW    windowFromHandleResource(wl_resource* res);
+ 
+     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
++    PHLWINDOW    windowFromHandleResource(wl_resource* res);
+ 
+   private:
+     void onManagerResourceDestroy(CForeignToplevelList* mgr);
+diff --git a/src/protocols/ImageCaptureSource.cpp b/src/protocols/ImageCaptureSource.cpp
+new file mode 100644
+index 00000000000..9f54533e0f0
+--- /dev/null
++++ b/src/protocols/ImageCaptureSource.cpp
+@@ -0,0 +1,135 @@
++#include "ImageCaptureSource.hpp"
++#include "core/Output.hpp"
++#include "../helpers/Monitor.hpp"
++#include "../desktop/view/Window.hpp"
++#include "ForeignToplevel.hpp"
++
++CImageCaptureSource::CImageCaptureSource(SP<CExtImageCaptureSourceV1> resource, PHLMONITOR pMonitor) : m_resource(resource), m_monitor(pMonitor) {
++    if UNLIKELY (!good())
++        return;
++
++    m_resource->setData(this);
++    m_resource->setDestroy([this](CExtImageCaptureSourceV1* pMgr) { PROTO::imageCaptureSource->destroyResource(this); });
++    m_resource->setOnDestroy([this](CExtImageCaptureSourceV1* pMgr) { PROTO::imageCaptureSource->destroyResource(this); });
++}
++
++CImageCaptureSource::CImageCaptureSource(SP<CExtImageCaptureSourceV1> resource, PHLWINDOW pWindow) : m_resource(resource), m_window(pWindow) {
++    if UNLIKELY (!good())
++        return;
++
++    m_resource->setData(this);
++    m_resource->setDestroy([this](CExtImageCaptureSourceV1* pMgr) { PROTO::imageCaptureSource->destroyResource(this); });
++    m_resource->setOnDestroy([this](CExtImageCaptureSourceV1* pMgr) { PROTO::imageCaptureSource->destroyResource(this); });
++}
++
++bool CImageCaptureSource::good() {
++    return m_resource && m_resource->resource();
++}
++
++std::string CImageCaptureSource::getName() {
++    if (!m_monitor.expired())
++        return m_monitor->m_name;
++    if (!m_window.expired())
++        return m_window->m_title;
++
++    return "error";
++}
++
++std::string CImageCaptureSource::getTypeName() {
++    if (!m_monitor.expired())
++        return "monitor";
++    if (!m_window.expired())
++        return "window";
++
++    return "error";
++}
++
++CBox CImageCaptureSource::logicalBox() {
++    if (!m_monitor.expired())
++        return m_monitor->logicalBox();
++    if (!m_window.expired())
++        return m_window->getFullWindowBoundingBox();
++    return CBox();
++}
++
++COutputImageCaptureSourceProtocol::COutputImageCaptureSourceProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
++    ;
++}
++
++void COutputImageCaptureSourceProtocol::bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id) {
++    const auto RESOURCE = PROTO::imageCaptureSource->m_outputManagers.emplace_back(makeShared<CExtOutputImageCaptureSourceManagerV1>(client, ver, id));
++
++    if UNLIKELY (!RESOURCE->resource()) {
++        wl_client_post_no_memory(client);
++        PROTO::imageCaptureSource->m_outputManagers.pop_back();
++        return;
++    }
++
++    RESOURCE->setDestroy([](CExtOutputImageCaptureSourceManagerV1* pMgr) { PROTO::imageCaptureSource->destroyResource(pMgr); });
++    RESOURCE->setOnDestroy([](CExtOutputImageCaptureSourceManagerV1* pMgr) { PROTO::imageCaptureSource->destroyResource(pMgr); });
++    RESOURCE->setCreateSource([](CExtOutputImageCaptureSourceManagerV1* pMgr, uint32_t id, wl_resource* output) {
++        PHLMONITOR pMonitor = CWLOutputResource::fromResource(output)->m_monitor.lock();
++        if (!pMonitor) {
++            LOGM(Log::ERR, "Client tried to create source from invalid output resource");
++            pMgr->error(-1, "invalid output resource");
++            return;
++        }
++
++        auto PSOURCE =
++            PROTO::imageCaptureSource->m_sources.emplace_back(makeShared<CImageCaptureSource>(makeShared<CExtImageCaptureSourceV1>(pMgr->client(), pMgr->version(), id), pMonitor));
++        PSOURCE->m_self = PSOURCE;
++
++        LOGM(Log::INFO, "New capture source for monitor: {}", pMonitor->m_name);
++    });
++}
++
++CToplevelImageCaptureSourceProtocol::CToplevelImageCaptureSourceProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
++    ;
++}
++
++void CToplevelImageCaptureSourceProtocol::bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id) {
++    const auto RESOURCE = PROTO::imageCaptureSource->m_toplevelManagers.emplace_back(makeShared<CExtForeignToplevelImageCaptureSourceManagerV1>(client, ver, id));
++
++    if UNLIKELY (!RESOURCE->resource()) {
++        RESOURCE->noMemory();
++        PROTO::imageCaptureSource->m_toplevelManagers.pop_back();
++        return;
++    }
++
++    RESOURCE->setDestroy([](CExtForeignToplevelImageCaptureSourceManagerV1* pMgr) { PROTO::imageCaptureSource->destroyResource(pMgr); });
++    RESOURCE->setOnDestroy([](CExtForeignToplevelImageCaptureSourceManagerV1* pMgr) { PROTO::imageCaptureSource->destroyResource(pMgr); });
++    RESOURCE->setCreateSource([](CExtForeignToplevelImageCaptureSourceManagerV1* pMgr, uint32_t id, wl_resource* handle) {
++        PHLWINDOW pWindow = PROTO::foreignToplevel->windowFromHandleResource(handle);
++        if (!pWindow) {
++            LOGM(Log::ERR, "Client tried to create source from invalid foreign toplevel handle resource");
++            pMgr->error(-1, "invalid foreign toplevel resource");
++            return;
++        }
++
++        auto PSOURCE =
++            PROTO::imageCaptureSource->m_sources.emplace_back(makeShared<CImageCaptureSource>(makeShared<CExtImageCaptureSourceV1>(pMgr->client(), pMgr->version(), id), pWindow));
++        PSOURCE->m_self = PSOURCE;
++
++        LOGM(Log::INFO, "New capture source for foreign toplevel: {}", pWindow->m_title);
++    });
++}
++
++CImageCaptureSourceProtocol::CImageCaptureSourceProtocol() {
++    m_output   = makeUnique<COutputImageCaptureSourceProtocol>(&ext_output_image_capture_source_manager_v1_interface, 1, "OutputImageCaptureSource");
++    m_toplevel = makeUnique<CToplevelImageCaptureSourceProtocol>(&ext_foreign_toplevel_image_capture_source_manager_v1_interface, 1, "ForeignToplevelImageCaptureSource");
++}
++
++SP<CImageCaptureSource> CImageCaptureSourceProtocol::sourceFromResource(wl_resource* res) {
++    auto data = sc<CImageCaptureSource*>(sc<CExtImageCaptureSourceV1*>(wl_resource_get_user_data(res))->data());
++    return data && data->m_self ? data->m_self.lock() : nullptr;
++}
++
++void CImageCaptureSourceProtocol::destroyResource(CExtOutputImageCaptureSourceManagerV1* resource) {
++    std::erase_if(m_outputManagers, [&](const auto& other) { return other.get() == resource; });
++}
++void CImageCaptureSourceProtocol::destroyResource(CExtForeignToplevelImageCaptureSourceManagerV1* resource) {
++    std::erase_if(m_toplevelManagers, [&](const auto& other) { return other.get() == resource; });
++}
++void CImageCaptureSourceProtocol::destroyResource(CImageCaptureSource* resource) {
++    std::erase_if(m_sources, [&](const auto& other) { return other.get() == resource; });
++}
+diff --git a/src/protocols/ImageCaptureSource.hpp b/src/protocols/ImageCaptureSource.hpp
+new file mode 100644
+index 00000000000..47580dd25c0
+--- /dev/null
++++ b/src/protocols/ImageCaptureSource.hpp
+@@ -0,0 +1,73 @@
++#pragma once
++
++#include <vector>
++
++#include "../defines.hpp"
++#include "../helpers/signal/Signal.hpp"
++#include "WaylandProtocol.hpp"
++#include "ext-image-capture-source-v1.hpp"
++
++class CImageCopyCaptureSession;
++
++class CImageCaptureSource {
++  public:
++    CImageCaptureSource(SP<CExtImageCaptureSourceV1> resource, PHLMONITOR pMonitor);
++    CImageCaptureSource(SP<CExtImageCaptureSourceV1> resource, PHLWINDOW pWindow);
++
++    bool                    good();
++    std::string             getName();
++    std::string             getTypeName();
++    CBox                    logicalBox();
++
++    WP<CImageCaptureSource> m_self;
++
++  private:
++    SP<CExtImageCaptureSourceV1> m_resource;
++
++    PHLMONITORREF                m_monitor;
++    PHLWINDOWREF                 m_window;
++
++    friend class CImageCopyCaptureSession;
++    friend class CImageCopyCaptureCursorSession;
++};
++
++class COutputImageCaptureSourceProtocol : public IWaylandProtocol {
++  public:
++    COutputImageCaptureSourceProtocol(const wl_interface* iface, const int& ver, const std::string& name);
++
++    virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
++};
++
++class CToplevelImageCaptureSourceProtocol : public IWaylandProtocol {
++  public:
++    CToplevelImageCaptureSourceProtocol(const wl_interface* iface, const int& ver, const std::string& name);
++
++    virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
++};
++
++class CImageCaptureSourceProtocol {
++  public:
++    CImageCaptureSourceProtocol();
++
++    SP<CImageCaptureSource> sourceFromResource(wl_resource* resource);
++
++    void                    destroyResource(CExtOutputImageCaptureSourceManagerV1* resource);
++    void                    destroyResource(CExtForeignToplevelImageCaptureSourceManagerV1* resource);
++    void                    destroyResource(CImageCaptureSource* resource);
++
++  private:
++    UP<COutputImageCaptureSourceProtocol>                           m_output;
++    UP<CToplevelImageCaptureSourceProtocol>                         m_toplevel;
++
++    std::vector<SP<CExtOutputImageCaptureSourceManagerV1>>          m_outputManagers;
++    std::vector<SP<CExtForeignToplevelImageCaptureSourceManagerV1>> m_toplevelManagers;
++
++    std::vector<SP<CImageCaptureSource>>                            m_sources;
++
++    friend class COutputImageCaptureSourceProtocol;
++    friend class CToplevelImageCaptureSourceProtocol;
++};
++
++namespace PROTO {
++    inline UP<CImageCaptureSourceProtocol> imageCaptureSource;
++};
+diff --git a/src/protocols/ImageCopyCapture.cpp b/src/protocols/ImageCopyCapture.cpp
+new file mode 100644
+index 00000000000..eca3c93934f
+--- /dev/null
++++ b/src/protocols/ImageCopyCapture.cpp
+@@ -0,0 +1,516 @@
++#include "ImageCopyCapture.hpp"
++#include "../managers/screenshare/ScreenshareManager.hpp"
++#include "../managers/permissions/DynamicPermissionManager.hpp"
++#include "../managers/PointerManager.hpp"
++#include "./core/Seat.hpp"
++#include "LinuxDMABUF.hpp"
++#include "../desktop/view/Window.hpp"
++#include "../render/OpenGL.hpp"
++#include "../desktop/state/FocusState.hpp"
++#include <cstring>
++
++using namespace Screenshare;
++
++CImageCopyCaptureSession::CImageCopyCaptureSession(SP<CExtImageCopyCaptureSessionV1> resource, SP<CImageCaptureSource> source, extImageCopyCaptureManagerV1Options options) :
++    m_resource(resource), m_source(source), m_paintCursor(options & EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_OPTIONS_PAINT_CURSORS) {
++    if UNLIKELY (!good())
++        return;
++
++    m_resource->setDestroy([this](CExtImageCopyCaptureSessionV1* pMgr) { PROTO::imageCopyCapture->destroyResource(this); });
++    m_resource->setOnDestroy([this](CExtImageCopyCaptureSessionV1* pMgr) { PROTO::imageCopyCapture->destroyResource(this); });
++
++    m_resource->setCreateFrame([this](CExtImageCopyCaptureSessionV1* pMgr, uint32_t id) {
++        if (!m_frame.expired()) {
++            LOGM(Log::ERR, "Duplicate frame in session for source: \"{}\"", m_source->getName());
++            m_resource->error(EXT_IMAGE_COPY_CAPTURE_SESSION_V1_ERROR_DUPLICATE_FRAME, "duplicate frame");
++            return;
++        }
++
++        auto PFRAME = PROTO::imageCopyCapture->m_frames.emplace_back(
++            makeShared<CImageCopyCaptureFrame>(makeShared<CExtImageCopyCaptureFrameV1>(pMgr->client(), pMgr->version(), id), m_self));
++
++        m_frame = PFRAME;
++    });
++
++    if (m_source->m_monitor)
++        m_session = Screenshare::mgr()->newSession(m_resource->client(), m_source->m_monitor.lock());
++    else
++        m_session = Screenshare::mgr()->newSession(m_resource->client(), m_source->m_window.lock());
++
++    if UNLIKELY (!m_session) {
++        m_resource->sendStopped();
++        m_resource->error(-1, "unable to share screen");
++        return;
++    }
++
++    sendConstraints();
++
++    m_listeners.constraintsChanged = m_session->m_events.constraintsChanged.listen([this]() { sendConstraints(); });
++    m_listeners.stopped            = m_session->m_events.stopped.listen([this]() { PROTO::imageCopyCapture->destroyResource(this); });
++}
++
++CImageCopyCaptureSession::~CImageCopyCaptureSession() {
++    if (m_session)
++        m_session->stop();
++    if (m_resource->resource())
++        m_resource->sendStopped();
++}
++
++bool CImageCopyCaptureSession::good() {
++    return m_resource && m_resource->resource();
++}
++
++void CImageCopyCaptureSession::sendConstraints() {
++    auto formats = m_session->allowedFormats();
++
++    if UNLIKELY (formats.empty()) {
++        m_session->stop();
++        m_resource->error(-1, "no formats available");
++        return;
++    }
++
++    for (DRMFormat format : formats) {
++        m_resource->sendShmFormat(NFormatUtils::drmToShm(format));
++
++        auto     modifiers = g_pHyprOpenGL->getDRMFormatModifiers(format);
++
++        wl_array modsArr;
++        wl_array_init(&modsArr);
++        if (!modifiers.empty()) {
++            wl_array_add(&modsArr, modifiers.size() * sizeof(uint64_t));
++            memcpy(modsArr.data, modifiers.data(), modifiers.size() * sizeof(uint64_t));
++        }
++        m_resource->sendDmabufFormat(format, &modsArr);
++        wl_array_release(&modsArr);
++    }
++
++    dev_t           device    = PROTO::linuxDma->getMainDevice();
++    struct wl_array deviceArr = {
++        .size = sizeof(device),
++        .data = sc<void*>(&device),
++    };
++    m_resource->sendDmabufDevice(&deviceArr);
++
++    m_bufferSize = m_session->bufferSize();
++    m_resource->sendBufferSize(m_bufferSize.x, m_bufferSize.y);
++
++    m_resource->sendDone();
++}
++
++CImageCopyCaptureCursorSession::CImageCopyCaptureCursorSession(SP<CExtImageCopyCaptureCursorSessionV1> resource, SP<CImageCaptureSource> source, SP<CWLPointerResource> pointer) :
++    m_resource(resource), m_source(source), m_pointer(pointer) {
++    if UNLIKELY (!good())
++        return;
++
++    if (!m_source || (!m_source->m_monitor && !m_source->m_window))
++        return;
++
++    const auto PMONITOR = m_source->m_monitor.expired() ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
++
++    // TODO: add listeners for source being destroyed
++
++    sendCursorEvents();
++    m_listeners.commit = PMONITOR->m_events.commit.listen([this, PMONITOR]() { sendCursorEvents(); });
++
++    m_resource->setDestroy([this](CExtImageCopyCaptureCursorSessionV1* pMgr) { PROTO::imageCopyCapture->destroyResource(this); });
++    m_resource->setOnDestroy([this](CExtImageCopyCaptureCursorSessionV1* pMgr) { PROTO::imageCopyCapture->destroyResource(this); });
++
++    m_resource->setGetCaptureSession([this](CExtImageCopyCaptureCursorSessionV1* pMgr, uint32_t id) {
++        if (m_session || m_sessionResource) {
++            LOGM(Log::ERR, "Duplicate cursor copy capture session for source: \"{}\"", m_source->getName());
++            m_resource->error(EXT_IMAGE_COPY_CAPTURE_CURSOR_SESSION_V1_ERROR_DUPLICATE_SESSION, "duplicate session");
++            return;
++        }
++
++        m_sessionResource = makeShared<CExtImageCopyCaptureSessionV1>(pMgr->client(), pMgr->version(), id);
++
++        m_sessionResource->setDestroy([this](CExtImageCopyCaptureSessionV1* pMgr) { destroyCaptureSession(); });
++        m_sessionResource->setOnDestroy([this](CExtImageCopyCaptureSessionV1* pMgr) { destroyCaptureSession(); });
++
++        m_sessionResource->setCreateFrame([this](CExtImageCopyCaptureSessionV1* pMgr, uint32_t id) {
++            if UNLIKELY (!m_session || !m_sessionResource)
++                return;
++
++            if (m_frameResource) {
++                LOGM(Log::ERR, "Duplicate frame in session for source: \"{}\"", m_source->getName());
++                m_resource->error(EXT_IMAGE_COPY_CAPTURE_SESSION_V1_ERROR_DUPLICATE_FRAME, "duplicate frame");
++                return;
++            }
++
++            createFrame(makeShared<CExtImageCopyCaptureFrameV1>(pMgr->client(), pMgr->version(), id));
++        });
++
++        m_session = Screenshare::mgr()->newCursorSession(pMgr->client(), m_pointer);
++        if UNLIKELY (!m_session) {
++            m_sessionResource->sendStopped();
++            m_sessionResource->error(-1, "unable to share cursor");
++            return;
++        }
++
++        sendConstraints();
++
++        m_listeners.constraintsChanged = m_session->m_events.constraintsChanged.listen([this]() { sendConstraints(); });
++        m_listeners.stopped            = m_session->m_events.stopped.listen([this]() { destroyCaptureSession(); });
++    });
++}
++
++CImageCopyCaptureCursorSession::~CImageCopyCaptureCursorSession() {
++    destroyCaptureSession();
++}
++
++bool CImageCopyCaptureCursorSession::good() {
++    return m_resource && m_resource->resource();
++}
++
++void CImageCopyCaptureCursorSession::destroyCaptureSession() {
++    m_listeners.constraintsChanged.reset();
++    m_listeners.stopped.reset();
++
++    if (m_frameResource && m_frameResource->resource())
++        m_frameResource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED);
++    m_frameResource.reset();
++
++    m_sessionResource.reset();
++    m_session.reset();
++}
++
++void CImageCopyCaptureCursorSession::createFrame(SP<CExtImageCopyCaptureFrameV1> resource) {
++    m_frameResource = resource;
++    m_captured      = false;
++    m_buffer.reset();
++
++    m_frameResource->setDestroy([this](CExtImageCopyCaptureFrameV1* pMgr) { m_frameResource.reset(); });
++    m_frameResource->setOnDestroy([this](CExtImageCopyCaptureFrameV1* pMgr) { m_frameResource.reset(); });
++
++    m_frameResource->setAttachBuffer([this](CExtImageCopyCaptureFrameV1* pMgr, wl_resource* buf) {
++        if UNLIKELY (!m_frameResource || !m_frameResource->resource())
++            return;
++
++        if (m_captured) {
++            LOGM(Log::ERR, "Frame already captured in attach_buffer, {:x}", (uintptr_t)this);
++            m_frameResource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_ALREADY_CAPTURED, "already captured");
++            m_frameResource.reset();
++            return;
++        }
++
++        auto PBUFFERRES = CWLBufferResource::fromResource(buf);
++        if (!PBUFFERRES || !PBUFFERRES->m_buffer) {
++            LOGM(Log::ERR, "Invalid buffer in attach_buffer {:x}", (uintptr_t)this);
++            m_frameResource->error(-1, "invalid buffer");
++            m_frameResource.reset();
++            return;
++        }
++
++        m_buffer = PBUFFERRES->m_buffer.lock();
++    });
++
++    m_frameResource->setDamageBuffer([this](CExtImageCopyCaptureFrameV1* pMgr, int32_t x, int32_t y, int32_t w, int32_t h) {
++        if UNLIKELY (!m_frameResource || !m_frameResource->resource())
++            return;
++
++        if (m_captured) {
++            LOGM(Log::ERR, "Frame already captured in damage_buffer, {:x}", (uintptr_t)this);
++            m_frameResource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_ALREADY_CAPTURED, "already captured");
++            m_frameResource.reset();
++            return;
++        }
++
++        if (x < 0 || y < 0 || w <= 0 || h <= 0) {
++            m_frameResource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_INVALID_BUFFER_DAMAGE, "invalid buffer damage");
++            m_frameResource.reset();
++            return;
++        }
++
++        // we don't really need to keep track of damage for cursor frames because we will just copy the whole thing
++    });
++
++    m_frameResource->setCapture([this](CExtImageCopyCaptureFrameV1* pMgr) {
++        if UNLIKELY (!m_frameResource || !m_frameResource->resource())
++            return;
++
++        if (m_captured) {
++            LOGM(Log::ERR, "Frame already captured in capture, {:x}", (uintptr_t)this);
++            m_frameResource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_ALREADY_CAPTURED, "already captured");
++            m_frameResource.reset();
++            return;
++        }
++
++        const auto PMONITOR = m_source->m_monitor.expired() ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
++
++        auto       sourceBoxCallback = [this]() { return m_source ? m_source->logicalBox() : CBox(); };
++        auto       error             = m_session->share(PMONITOR, m_buffer, sourceBoxCallback, [this](eScreenshareResult result) {
++            switch (result) {
++                case RESULT_COPIED: m_frameResource->sendReady(); break;
++                case RESULT_NOT_COPIED: m_frameResource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN); break;
++                case RESULT_TIMESTAMP:
++                    auto [sec, nsec] = Time::secNsec(Time::steadyNow());
++                    uint32_t tvSecHi = (sizeof(sec) > 4) ? sec >> 32 : 0;
++                    uint32_t tvSecLo = sec & 0xFFFFFFFF;
++                    m_frameResource->sendPresentationTime(tvSecHi, tvSecLo, nsec);
++                    break;
++            }
++        });
++
++        if (!m_frameResource)
++            return;
++
++        switch (error) {
++            case ERROR_NONE: m_captured = true; break;
++            case ERROR_NO_BUFFER:
++                m_frameResource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_NO_BUFFER, "no buffer attached");
++                m_frameResource.reset();
++                break;
++            case ERROR_BUFFER_SIZE:
++            case ERROR_BUFFER_FORMAT: m_frameResource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS); break;
++            case ERROR_STOPPED: m_frameResource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED); break;
++            case ERROR_UNKNOWN: m_frameResource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN); break;
++        }
++    });
++
++    // we should always copy over the entire cursor image, it doesn't cost much
++    m_frameResource->sendDamage(0, 0, m_bufferSize.x, m_bufferSize.y);
++
++    // the cursor is never transformed... probably?
++    m_frameResource->sendTransform(WL_OUTPUT_TRANSFORM_NORMAL);
++}
++
++void CImageCopyCaptureCursorSession::sendConstraints() {
++    if UNLIKELY (!m_session || !m_sessionResource)
++        return;
++
++    auto format = m_session->format();
++    if UNLIKELY (format == DRM_FORMAT_INVALID) {
++        m_session->stop();
++        m_sessionResource->error(-1, "no formats available");
++        return;
++    }
++
++    m_sessionResource->sendShmFormat(NFormatUtils::drmToShm(format));
++
++    auto     modifiers = g_pHyprOpenGL->getDRMFormatModifiers(format);
++
++    wl_array modsArr;
++    wl_array_init(&modsArr);
++    if (!modifiers.empty()) {
++        wl_array_add(&modsArr, modifiers.size() * sizeof(uint64_t));
++        memcpy(modsArr.data, modifiers.data(), modifiers.size() * sizeof(uint64_t));
++    }
++    m_sessionResource->sendDmabufFormat(format, &modsArr);
++    wl_array_release(&modsArr);
++
++    dev_t           device    = PROTO::linuxDma->getMainDevice();
++    struct wl_array deviceArr = {
++        .size = sizeof(device),
++        .data = sc<void*>(&device),
++    };
++    m_sessionResource->sendDmabufDevice(&deviceArr);
++
++    m_bufferSize = m_session->bufferSize();
++    m_sessionResource->sendBufferSize(m_bufferSize.x, m_bufferSize.y);
++
++    m_sessionResource->sendDone();
++}
++
++void CImageCopyCaptureCursorSession::sendCursorEvents() {
++    const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_CURSOR_POS);
++    if (PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW) {
++        if (PERM == PERMISSION_RULE_ALLOW_MODE_DENY) {
++            m_resource->error(-1, "client not allowed to capture cursor");
++            PROTO::imageCopyCapture->destroyResource(this);
++        }
++        return;
++    }
++
++    const auto PMONITOR  = m_source->m_monitor.expired() ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
++    CBox       sourceBox = m_source->logicalBox();
++    bool       overlaps  = g_pPointerManager->getCursorBoxGlobal().overlaps(sourceBox);
++
++    if (m_entered && !overlaps) {
++        m_entered = false;
++        m_resource->sendLeave();
++        return;
++    } else if (!m_entered && overlaps) {
++        m_entered = true;
++        m_resource->sendEnter();
++    }
++
++    if (!overlaps)
++        return;
++
++    Vector2D pos = g_pPointerManager->position() - sourceBox.pos();
++    if (pos != m_pos) {
++        m_pos = pos;
++        m_resource->sendPosition(m_pos.x, m_pos.y);
++    }
++
++    Vector2D hotspot = g_pPointerManager->hotspot();
++    if (hotspot != m_hotspot) {
++        m_hotspot = hotspot;
++        m_resource->sendHotspot(m_hotspot.x, m_hotspot.y);
++    }
++}
++
++CImageCopyCaptureFrame::CImageCopyCaptureFrame(SP<CExtImageCopyCaptureFrameV1> resource, WP<CImageCopyCaptureSession> session) : m_resource(resource), m_session(session) {
++    if UNLIKELY (!good())
++        return;
++
++    if (m_session->m_bufferSize != m_session->m_session->bufferSize()) {
++        m_session->sendConstraints();
++        m_resource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN);
++        return;
++    }
++
++    m_frame = m_session->m_session->nextFrame(m_session->m_paintCursor);
++
++    m_resource->setDestroy([this](CExtImageCopyCaptureFrameV1* pMgr) { PROTO::imageCopyCapture->destroyResource(this); });
++    m_resource->setOnDestroy([this](CExtImageCopyCaptureFrameV1* pMgr) { PROTO::imageCopyCapture->destroyResource(this); });
++
++    m_resource->setAttachBuffer([this](CExtImageCopyCaptureFrameV1* pMgr, wl_resource* buf) {
++        if (m_captured) {
++            LOGM(Log::ERR, "Frame already captured in attach_buffer, {:x}", (uintptr_t)this);
++            m_resource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_ALREADY_CAPTURED, "already captured");
++            return;
++        }
++
++        auto PBUFFERRES = CWLBufferResource::fromResource(buf);
++        if (!PBUFFERRES || !PBUFFERRES->m_buffer) {
++            LOGM(Log::ERR, "Invalid buffer in attach_buffer {:x}", (uintptr_t)this);
++            m_resource->error(-1, "invalid buffer");
++            return;
++        }
++
++        m_buffer = PBUFFERRES->m_buffer.lock();
++    });
++
++    m_resource->setDamageBuffer([this](CExtImageCopyCaptureFrameV1* pMgr, int32_t x, int32_t y, int32_t w, int32_t h) {
++        if (m_captured) {
++            LOGM(Log::ERR, "Frame already captured in damage_buffer, {:x}", (uintptr_t)this);
++            m_resource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_ALREADY_CAPTURED, "already captured");
++            return;
++        }
++
++        if (x < 0 || y < 0 || w <= 0 || h <= 0) {
++            m_resource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_INVALID_BUFFER_DAMAGE, "invalid buffer damage");
++            return;
++        }
++
++        m_clientDamage.add(x, y, w, h);
++    });
++
++    m_resource->setCapture([this](CExtImageCopyCaptureFrameV1* pMgr) {
++        if (m_captured) {
++            LOGM(Log::ERR, "Frame already captured in capture, {:x}", (uintptr_t)this);
++            m_resource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_ALREADY_CAPTURED, "already captured");
++            return;
++        }
++
++        auto error = m_frame->share(m_buffer, m_clientDamage, [this](eScreenshareResult result) {
++            switch (result) {
++                case RESULT_COPIED: m_resource->sendReady(); break;
++                case RESULT_NOT_COPIED: m_resource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN); break;
++                case RESULT_TIMESTAMP:
++                    auto [sec, nsec] = Time::secNsec(Time::steadyNow());
++                    uint32_t tvSecHi = (sizeof(sec) > 4) ? sec >> 32 : 0;
++                    uint32_t tvSecLo = sec & 0xFFFFFFFF;
++                    m_resource->sendPresentationTime(tvSecHi, tvSecLo, nsec);
++                    break;
++            }
++        });
++
++        switch (error) {
++            case ERROR_NONE: m_captured = true; break;
++            case ERROR_NO_BUFFER: m_resource->error(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_NO_BUFFER, "no buffer attached"); break;
++            case ERROR_BUFFER_SIZE:
++            case ERROR_BUFFER_FORMAT: m_resource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS); break;
++            case ERROR_STOPPED: m_resource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED); break;
++            case ERROR_UNKNOWN: m_resource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN); break;
++        }
++    });
++
++    m_clientDamage.clear();
++
++    // TODO: see ScreenshareFrame::share() for "add a damage ring for output damage since last shared frame"
++    m_resource->sendDamage(0, 0, m_session->m_bufferSize.x, m_session->m_bufferSize.y);
++
++    m_resource->sendTransform(m_frame->transform());
++}
++
++CImageCopyCaptureFrame::~CImageCopyCaptureFrame() {
++    if (m_session)
++        m_session->m_frame.reset();
++}
++
++bool CImageCopyCaptureFrame::good() {
++    return m_resource && m_resource->resource();
++}
++
++CImageCopyCaptureProtocol::CImageCopyCaptureProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
++    ;
++}
++
++void CImageCopyCaptureProtocol::bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id) {
++    const auto RESOURCE = m_managers.emplace_back(makeShared<CExtImageCopyCaptureManagerV1>(client, ver, id));
++
++    if UNLIKELY (!RESOURCE->resource()) {
++        wl_client_post_no_memory(client);
++        m_managers.pop_back();
++        return;
++    }
++
++    RESOURCE->setDestroy([this](CExtImageCopyCaptureManagerV1* pMgr) { destroyResource(pMgr); });
++    RESOURCE->setOnDestroy([this](CExtImageCopyCaptureManagerV1* pMgr) { destroyResource(pMgr); });
++
++    RESOURCE->setCreateSession([this](CExtImageCopyCaptureManagerV1* pMgr, uint32_t id, wl_resource* source_, extImageCopyCaptureManagerV1Options options) {
++        auto source = PROTO::imageCaptureSource->sourceFromResource(source_);
++        if (!source) {
++            LOGM(Log::ERR, "Client tried to create image copy capture session from invalid source");
++            pMgr->error(-1, "invalid image capture source");
++            return;
++        }
++
++        if (options > 1) {
++            LOGM(Log::ERR, "Client tried to create image copy capture session with invalid options");
++            pMgr->error(EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_ERROR_INVALID_OPTION, "Options can't be above 1");
++            return;
++        }
++
++        auto& PSESSION =
++            m_sessions.emplace_back(makeShared<CImageCopyCaptureSession>(makeShared<CExtImageCopyCaptureSessionV1>(pMgr->client(), pMgr->version(), id), source, options));
++        PSESSION->m_self = PSESSION;
++        LOGM(Log::INFO, "New image copy capture session for source ({}): \"{}\"", source->getTypeName(), source->getName());
++    });
++
++    RESOURCE->setCreatePointerCursorSession([this](CExtImageCopyCaptureManagerV1* pMgr, uint32_t id, wl_resource* source_, wl_resource* pointer_) {
++        SP<CImageCaptureSource> source = PROTO::imageCaptureSource->sourceFromResource(source_);
++        if (!source) {
++            LOGM(Log::ERR, "Client tried to create image copy capture session from invalid source");
++            destroyResource(pMgr);
++            return;
++        }
++
++        const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(pMgr->client(), PERMISSION_TYPE_CURSOR_POS);
++        if (PERM == PERMISSION_RULE_ALLOW_MODE_DENY)
++            return;
++
++        m_cursorSessions.emplace_back(makeShared<CImageCopyCaptureCursorSession>(makeShared<CExtImageCopyCaptureCursorSessionV1>(pMgr->client(), pMgr->version(), id), source,
++                                                                                 CWLPointerResource::fromResource(pointer_)));
++
++        LOGM(Log::INFO, "New image copy capture cursor session for source ({}): \"{}\"", source->getTypeName(), source->getName());
++    });
++}
++
++void CImageCopyCaptureProtocol::destroyResource(CExtImageCopyCaptureManagerV1* resource) {
++    std::erase_if(m_managers, [&](const auto& other) { return other.get() == resource; });
++}
++
++void CImageCopyCaptureProtocol::destroyResource(CImageCopyCaptureSession* resource) {
++    std::erase_if(m_sessions, [&](const auto& other) { return other.get() == resource; });
++}
++
++void CImageCopyCaptureProtocol::destroyResource(CImageCopyCaptureCursorSession* resource) {
++    std::erase_if(m_cursorSessions, [&](const auto& other) { return other.get() == resource; });
++}
++
++void CImageCopyCaptureProtocol::destroyResource(CImageCopyCaptureFrame* resource) {
++    std::erase_if(m_frames, [&](const auto& other) { return other.get() == resource; });
++}
+diff --git a/src/protocols/ImageCopyCapture.hpp b/src/protocols/ImageCopyCapture.hpp
+new file mode 100644
+index 00000000000..b8cfa1e89f2
+--- /dev/null
++++ b/src/protocols/ImageCopyCapture.hpp
+@@ -0,0 +1,133 @@
++#pragma once
++
++#include <vector>
++
++#include "../defines.hpp"
++#include "../helpers/signal/Signal.hpp"
++#include "../helpers/Format.hpp"
++#include "WaylandProtocol.hpp"
++#include "ImageCaptureSource.hpp"
++#include "ext-image-copy-capture-v1.hpp"
++
++class IHLBuffer;
++class CWLPointerResource;
++namespace Screenshare {
++    class CCursorshareSession;
++    class CScreenshareSession;
++    class CScreenshareFrame;
++};
++
++class CImageCopyCaptureFrame {
++  public:
++    CImageCopyCaptureFrame(SP<CExtImageCopyCaptureFrameV1> resource, WP<CImageCopyCaptureSession> session);
++    ~CImageCopyCaptureFrame();
++
++    bool good();
++
++  private:
++    SP<CExtImageCopyCaptureFrameV1>    m_resource;
++    WP<CImageCopyCaptureSession>       m_session;
++    UP<Screenshare::CScreenshareFrame> m_frame;
++
++    bool                               m_captured = false;
++    SP<IHLBuffer>                      m_buffer;
++    CRegion                            m_clientDamage;
++
++    friend class CImageCopyCaptureSession;
++};
++
++class CImageCopyCaptureSession {
++  public:
++    CImageCopyCaptureSession(SP<CExtImageCopyCaptureSessionV1> resource, SP<CImageCaptureSource> source, extImageCopyCaptureManagerV1Options options);
++    ~CImageCopyCaptureSession();
++
++    bool good();
++
++  private:
++    SP<CExtImageCopyCaptureSessionV1>    m_resource;
++
++    SP<CImageCaptureSource>              m_source;
++    UP<Screenshare::CScreenshareSession> m_session;
++    WP<CImageCopyCaptureFrame>           m_frame;
++
++    Vector2D                             m_bufferSize  = Vector2D(0, 0);
++    bool                                 m_paintCursor = true;
++
++    struct {
++        CHyprSignalListener constraintsChanged;
++        CHyprSignalListener stopped;
++    } m_listeners;
++
++    WP<CImageCopyCaptureSession> m_self;
++
++    //
++    void sendConstraints();
++
++    friend class CImageCopyCaptureProtocol;
++    friend class CImageCopyCaptureFrame;
++};
++
++class CImageCopyCaptureCursorSession {
++  public:
++    CImageCopyCaptureCursorSession(SP<CExtImageCopyCaptureCursorSessionV1> resource, SP<CImageCaptureSource> source, SP<CWLPointerResource> pointer);
++    ~CImageCopyCaptureCursorSession();
++
++    bool good();
++
++  private:
++    SP<CExtImageCopyCaptureCursorSessionV1> m_resource;
++    SP<CImageCaptureSource>                 m_source;
++    SP<CWLPointerResource>                  m_pointer;
++
++    // cursor session stuff
++    bool     m_entered = false;
++    Vector2D m_pos     = Vector2D(0, 0);
++    Vector2D m_hotspot = Vector2D(0, 0);
++
++    // capture session stuff
++    SP<CExtImageCopyCaptureSessionV1>    m_sessionResource;
++    UP<Screenshare::CCursorshareSession> m_session;
++    Vector2D                             m_bufferSize = Vector2D(0, 0);
++
++    // frame stuff
++    SP<CExtImageCopyCaptureFrameV1> m_frameResource;
++    bool                            m_captured = false;
++    SP<IHLBuffer>                   m_buffer;
++
++    struct {
++        CHyprSignalListener constraintsChanged;
++        CHyprSignalListener stopped;
++        CHyprSignalListener commit;
++    } m_listeners;
++
++    void sendCursorEvents();
++
++    void createFrame(SP<CExtImageCopyCaptureFrameV1> resource);
++    void destroyCaptureSession();
++    void sendConstraints();
++};
++
++class CImageCopyCaptureProtocol : public IWaylandProtocol {
++  public:
++    CImageCopyCaptureProtocol(const wl_interface* iface, const int& ver, const std::string& name);
++
++    virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
++
++    void         destroyResource(CExtImageCopyCaptureManagerV1* resource);
++    void         destroyResource(CImageCopyCaptureSession* resource);
++    void         destroyResource(CImageCopyCaptureCursorSession* resource);
++    void         destroyResource(CImageCopyCaptureFrame* resource);
++
++  private:
++    std::vector<SP<CExtImageCopyCaptureManagerV1>>  m_managers;
++    std::vector<SP<CImageCopyCaptureSession>>       m_sessions;
++    std::vector<SP<CImageCopyCaptureCursorSession>> m_cursorSessions;
++
++    std::vector<SP<CImageCopyCaptureFrame>>         m_frames;
++
++    friend class CImageCopyCaptureSession;
++};
++
++namespace PROTO {
++    inline UP<CImageCopyCaptureProtocol> imageCopyCapture;
++};
+diff --git a/src/protocols/LinuxDMABUF.cpp b/src/protocols/LinuxDMABUF.cpp
+index 296a27ed5af..e49e2b6e99b 100644
+--- a/src/protocols/LinuxDMABUF.cpp
++++ b/src/protocols/LinuxDMABUF.cpp
+@@ -643,3 +643,7 @@ void CLinuxDMABufV1Protocol::updateScanoutTranche(SP<CWLSurfaceResource> surface
+ 
+     feedbackResource->m_lastFeedbackWasScanout = true;
+ }
++
++dev_t CLinuxDMABufV1Protocol::getMainDevice() {
++    return m_mainDevice;
++}
+diff --git a/src/protocols/LinuxDMABUF.hpp b/src/protocols/LinuxDMABUF.hpp
+index 296ef04db7c..b1d59155386 100644
+--- a/src/protocols/LinuxDMABUF.hpp
++++ b/src/protocols/LinuxDMABUF.hpp
+@@ -113,6 +113,7 @@ class CLinuxDMABufV1Protocol : public IWaylandProtocol {
+ 
+     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
+     void         updateScanoutTranche(SP<CWLSurfaceResource> surface, PHLMONITOR pMonitor);
++    dev_t        getMainDevice();
+ 
+   private:
+     void destroyResource(CLinuxDMABUFResource* resource);
+diff --git a/src/protocols/Screencopy.cpp b/src/protocols/Screencopy.cpp
+index ac7146b47e9..74b3b608d30 100644
+--- a/src/protocols/Screencopy.cpp
++++ b/src/protocols/Screencopy.cpp
+@@ -1,507 +1,164 @@
+ #include "Screencopy.hpp"
+-#include "../Compositor.hpp"
+-#include "../managers/eventLoop/EventLoopManager.hpp"
+-#include "../managers/PointerManager.hpp"
+-#include "../managers/input/InputManager.hpp"
+-#include "../managers/EventManager.hpp"
+-#include "../managers/permissions/DynamicPermissionManager.hpp"
+-#include "../render/Renderer.hpp"
+-#include "../render/OpenGL.hpp"
+-#include "../helpers/Monitor.hpp"
++#include "../managers/screenshare/ScreenshareManager.hpp"
+ #include "core/Output.hpp"
+-#include "types/WLBuffer.hpp"
++#include "../render/Renderer.hpp"
+ #include "types/Buffer.hpp"
+-#include "ColorManagement.hpp"
+ #include "../helpers/Format.hpp"
+ #include "../helpers/time/Time.hpp"
+-#include "XDGShell.hpp"
+ 
+-#include <algorithm>
+-#include <functional>
++using namespace Screenshare;
+ 
+-CScreencopyFrame::CScreencopyFrame(SP<CZwlrScreencopyFrameV1> resource_, int32_t overlay_cursor, wl_resource* output, CBox box_) : m_resource(resource_) {
++CScreencopyClient::CScreencopyClient(SP<CZwlrScreencopyManagerV1> resource_) : m_resource(resource_) {
+     if UNLIKELY (!good())
+         return;
+ 
+-    m_overlayCursor = !!overlay_cursor;
+-    m_monitor       = CWLOutputResource::fromResource(output)->m_monitor;
+-
+-    if (!m_monitor) {
+-        LOGM(Log::ERR, "Client requested sharing of a monitor that doesn't exist");
+-        m_resource->sendFailed();
+-        return;
+-    }
+-
+-    m_resource->setOnDestroy([this](CZwlrScreencopyFrameV1* pMgr) { PROTO::screencopy->destroyResource(this); });
+-    m_resource->setDestroy([this](CZwlrScreencopyFrameV1* pFrame) { PROTO::screencopy->destroyResource(this); });
+-    m_resource->setCopy([this](CZwlrScreencopyFrameV1* pFrame, wl_resource* res) { this->copy(pFrame, res); });
+-    m_resource->setCopyWithDamage([this](CZwlrScreencopyFrameV1* pFrame, wl_resource* res) {
+-        m_withDamage = true;
+-        this->copy(pFrame, res);
++    m_resource->setDestroy([this](CZwlrScreencopyManagerV1* pMgr) { PROTO::screencopy->destroyResource(this); });
++    m_resource->setOnDestroy([this](CZwlrScreencopyManagerV1* pMgr) {
++        Screenshare::mgr()->destroyClientSessions(m_savedClient);
++        PROTO::screencopy->destroyResource(this);
+     });
++    m_resource->setCaptureOutput(
++        [this](CZwlrScreencopyManagerV1* pMgr, uint32_t frame, int32_t overlayCursor, wl_resource* output) { captureOutput(frame, overlayCursor, output, {}); });
++    m_resource->setCaptureOutputRegion([this](CZwlrScreencopyManagerV1* pMgr, uint32_t frame, int32_t overlayCursor, wl_resource* output, int32_t x, int32_t y, int32_t w,
++                                              int32_t h) { captureOutput(frame, overlayCursor, output, {x, y, w, h}); });
+ 
+-    g_pHyprRenderer->makeEGLCurrent();
+-
+-    m_shmFormat = g_pHyprOpenGL->getPreferredReadFormat(m_monitor.lock());
+-    if (m_shmFormat == DRM_FORMAT_INVALID) {
+-        LOGM(Log::ERR, "No format supported by renderer in capture output");
+-        m_resource->sendFailed();
+-        return;
+-    }
+-
+-    // TODO: hack, we can't bit flip so we'll format flip heh, GL_BGRA_EXT won't work here
+-    if (m_shmFormat == DRM_FORMAT_XRGB2101010 || m_shmFormat == DRM_FORMAT_ARGB2101010)
+-        m_shmFormat = DRM_FORMAT_XBGR2101010;
+-
+-    const auto PSHMINFO = NFormatUtils::getPixelFormatFromDRM(m_shmFormat);
+-    if (!PSHMINFO) {
+-        LOGM(Log::ERR, "No pixel format supported by renderer in capture output");
+-        m_resource->sendFailed();
+-        return;
+-    }
+-
+-    m_dmabufFormat = g_pHyprOpenGL->getPreferredReadFormat(m_monitor.lock());
+-
+-    if (box_.width == 0 && box_.height == 0)
+-        m_box = {0, 0, sc<int>(m_monitor->m_size.x), sc<int>(m_monitor->m_size.y)};
+-    else
+-        m_box = box_;
+-
+-    const auto POS = m_box.pos() * m_monitor->m_scale;
+-    m_box.transform(Math::wlTransformToHyprutils(m_monitor->m_transform), m_monitor->m_pixelSize.x, m_monitor->m_pixelSize.y).scale(m_monitor->m_scale).round();
+-    m_box.x = POS.x;
+-    m_box.y = POS.y;
+-
+-    m_shmStride = NFormatUtils::minStride(PSHMINFO, m_box.w);
+-
+-    m_resource->sendBuffer(NFormatUtils::drmToShm(m_shmFormat), m_box.width, m_box.height, m_shmStride);
+-
+-    if (m_resource->version() >= 3) {
+-        if LIKELY (m_dmabufFormat != DRM_FORMAT_INVALID)
+-            m_resource->sendLinuxDmabuf(m_dmabufFormat, m_box.width, m_box.height);
+-
+-        m_resource->sendBufferDone();
+-    }
++    m_savedClient = m_resource->client();
+ }
+ 
+-void CScreencopyFrame::copy(CZwlrScreencopyFrameV1* pFrame, wl_resource* buffer_) {
+-    if UNLIKELY (!good()) {
+-        LOGM(Log::ERR, "No frame in copyFrame??");
+-        return;
+-    }
+-
+-    if UNLIKELY (!g_pCompositor->monitorExists(m_monitor.lock())) {
+-        LOGM(Log::ERR, "Client requested sharing of a monitor that is gone");
+-        m_resource->sendFailed();
+-        return;
+-    }
++CScreencopyClient::~CScreencopyClient() {
++    Screenshare::mgr()->destroyClientSessions(m_savedClient);
++}
+ 
+-    const auto PBUFFER = CWLBufferResource::fromResource(buffer_);
+-    if UNLIKELY (!PBUFFER) {
+-        LOGM(Log::ERR, "Invalid buffer in {:x}", (uintptr_t)this);
+-        m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer");
+-        PROTO::screencopy->destroyResource(this);
++void CScreencopyClient::captureOutput(uint32_t frame, int32_t overlayCursor_, wl_resource* output, CBox box) {
++    const auto PMONITORRES = CWLOutputResource::fromResource(output);
++    if (!PMONITORRES || !PMONITORRES->m_monitor) {
++        LOGM(Log::ERR, "Tried to capture invalid output/monitor in {:x}", (uintptr_t)this);
++        m_resource->error(-1, "invalid output");
+         return;
+     }
+ 
+-    if UNLIKELY (PBUFFER->m_buffer->size != m_box.size()) {
+-        LOGM(Log::ERR, "Invalid dimensions in {:x}", (uintptr_t)this);
+-        m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer dimensions");
+-        PROTO::screencopy->destroyResource(this);
+-        return;
+-    }
++    const auto PMONITOR = PMONITORRES->m_monitor.lock();
++    auto       session  = box.w == 0 && box.h == 0 ? Screenshare::mgr()->getManagedSession(m_resource->client(), PMONITOR) :
++                                                     Screenshare::mgr()->getManagedSession(m_resource->client(), PMONITOR, box);
+ 
+-    if UNLIKELY (m_buffer) {
+-        LOGM(Log::ERR, "Buffer used in {:x}", (uintptr_t)this);
+-        m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_ALREADY_USED, "frame already used");
+-        PROTO::screencopy->destroyResource(this);
+-        return;
+-    }
+-
+-    if (auto attrs = PBUFFER->m_buffer->dmabuf(); attrs.success) {
+-        m_bufferDMA = true;
++    const auto FRAME = PROTO::screencopy->m_frames.emplace_back(
++        makeShared<CScreencopyFrame>(makeShared<CZwlrScreencopyFrameV1>(m_resource->client(), m_resource->version(), frame), session, !!overlayCursor_));
+ 
+-        if (attrs.format != m_dmabufFormat) {
+-            LOGM(Log::ERR, "Invalid buffer dma format in {:x}", (uintptr_t)pFrame);
+-            m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer format");
+-            PROTO::screencopy->destroyResource(this);
+-            return;
+-        }
+-    } else if (auto attrs = PBUFFER->m_buffer->shm(); attrs.success) {
+-        if (attrs.format != m_shmFormat) {
+-            LOGM(Log::ERR, "Invalid buffer shm format in {:x}", (uintptr_t)pFrame);
+-            m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer format");
+-            PROTO::screencopy->destroyResource(this);
+-            return;
+-        } else if (attrs.stride != m_shmStride) {
+-            LOGM(Log::ERR, "Invalid buffer shm stride in {:x}", (uintptr_t)pFrame);
+-            m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer stride");
+-            PROTO::screencopy->destroyResource(this);
+-            return;
+-        }
+-    } else {
+-        LOGM(Log::ERR, "Invalid buffer type in {:x}", (uintptr_t)pFrame);
+-        m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer type");
+-        PROTO::screencopy->destroyResource(this);
++    if (!FRAME->good()) {
++        LOGM(Log::ERR, "Couldn't alloc frame for sharing! (no memory)");
++        m_resource->noMemory();
++        PROTO::screencopy->destroyResource(FRAME.get());
+         return;
+     }
+ 
+-    m_buffer = CHLBufferReference(PBUFFER->m_buffer.lock());
+-
+-    PROTO::screencopy->m_framesAwaitingWrite.emplace_back(m_self);
+-
+-    g_pHyprRenderer->m_directScanoutBlocked = true;
++    FRAME->m_client = m_self;
++    FRAME->m_self   = FRAME;
++}
+ 
+-    if (!m_withDamage)
+-        g_pHyprRenderer->damageMonitor(m_monitor.lock());
++bool CScreencopyClient::good() {
++    return m_resource && m_resource->resource();
+ }
+ 
+-void CScreencopyFrame::share() {
+-    if (!m_buffer || !m_monitor)
++CScreencopyFrame::CScreencopyFrame(SP<CZwlrScreencopyFrameV1> resource_, WP<CScreenshareSession> session, bool overlayCursor) :
++    m_resource(resource_), m_session(session), m_overlayCursor(overlayCursor) {
++    if UNLIKELY (!good())
+         return;
+ 
+-    const auto NOW = Time::steadyNow();
+-
+-    auto       callback = [this, NOW, weak = m_self](bool success) {
+-        if (weak.expired())
+-            return;
++    m_resource->setOnDestroy([this](CZwlrScreencopyFrameV1* pMgr) { PROTO::screencopy->destroyResource(this); });
++    m_resource->setDestroy([this](CZwlrScreencopyFrameV1* pFrame) { PROTO::screencopy->destroyResource(this); });
++    m_resource->setCopy([this](CZwlrScreencopyFrameV1* pFrame, wl_resource* res) { shareFrame(pFrame, res, false); });
++    m_resource->setCopyWithDamage([this](CZwlrScreencopyFrameV1* pFrame, wl_resource* res) { shareFrame(pFrame, res, true); });
+ 
+-        if (!success) {
+-            LOGM(Log::ERR, "{} copy failed in {:x}", m_bufferDMA ? "Dmabuf" : "Shm", (uintptr_t)this);
++    m_listeners.stopped = m_session->m_events.stopped.listen([this]() {
++        if (good())
+             m_resource->sendFailed();
+-            return;
+-        }
+-
+-        m_resource->sendFlags(sc<zwlrScreencopyFrameV1Flags>(0));
+-        if (m_withDamage) {
+-            // TODO: add a damage ring for this.
+-            m_resource->sendDamage(0, 0, m_buffer->size.x, m_buffer->size.y);
+-        }
+-
+-        const auto [sec, nsec] = Time::secNsec(NOW);
+-
+-        uint32_t tvSecHi = (sizeof(sec) > 4) ? sec >> 32 : 0;
+-        uint32_t tvSecLo = sec & 0xFFFFFFFF;
+-        m_resource->sendReady(tvSecHi, tvSecLo, nsec);
+-    };
++    });
+ 
+-    if (m_bufferDMA)
+-        copyDmabuf(callback);
+-    else
+-        callback(copyShm());
+-}
++    m_frame = m_session->nextFrame(overlayCursor);
+ 
+-void CScreencopyFrame::renderMon() {
+-    auto       TEXTURE    = makeShared<CTexture>(m_monitor->m_output->state->state().buffer);
+-    CRegion    fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
+-
+-    const bool IS_CM_AWARE = PROTO::colorManagement && PROTO::colorManagement->isClientCMAware(m_client->client());
+-
+-    CBox       monbox = CBox{0, 0, m_monitor->m_pixelSize.x, m_monitor->m_pixelSize.y}
+-                      .translate({-m_box.x, -m_box.y}) // vvvv kinda ass-backwards but that's how I designed the renderer... sigh.
+-                      .transform(Math::wlTransformToHyprutils(Math::invertTransform(m_monitor->m_transform)), m_monitor->m_pixelSize.x, m_monitor->m_pixelSize.y);
+-    g_pHyprOpenGL->pushMonitorTransformEnabled(true);
+-    g_pHyprOpenGL->setRenderModifEnabled(false);
+-    g_pHyprOpenGL->renderTexture(TEXTURE, monbox,
+-                                 {
+-                                     .cmBackToSRGB       = !IS_CM_AWARE,
+-                                     .cmBackToSRGBSource = !IS_CM_AWARE ? m_monitor.lock() : nullptr,
+-                                 });
+-    g_pHyprOpenGL->setRenderModifEnabled(true);
+-    g_pHyprOpenGL->popMonitorTransformEnabled();
+-
+-    auto hidePopups = [&](Vector2D popupBaseOffset) {
+-        return [&, popupBaseOffset](WP<Desktop::View::CPopup> popup, void*) {
+-            if (!popup->wlSurface() || !popup->wlSurface()->resource() || !popup->visible())
+-                return;
+-
+-            const auto popRel = popup->coordsRelativeToParent();
+-            popup->wlSurface()->resource()->breadthfirst(
+-                [&](SP<CWLSurfaceResource> surf, const Vector2D& localOff, void*) {
+-                    const auto size    = surf->m_current.size;
+-                    const auto surfBox = CBox{popupBaseOffset + popRel + localOff, size}.translate(m_monitor->m_position).scale(m_monitor->m_scale).translate(-m_box.pos());
+-
+-                    if LIKELY (surfBox.w > 0 && surfBox.h > 0)
+-                        g_pHyprOpenGL->renderRect(surfBox, Colors::BLACK, {});
+-                },
+-                nullptr);
+-        };
+-    };
+-
+-    for (auto const& l : g_pCompositor->m_layers) {
+-        if (!l->m_ruleApplicator->noScreenShare().valueOrDefault())
+-            continue;
+-
+-        if UNLIKELY (!l->visible())
+-            continue;
+-
+-        const auto REALPOS  = l->m_realPosition->value();
+-        const auto REALSIZE = l->m_realSize->value();
+-
+-        const auto noScreenShareBox =
+-            CBox{REALPOS.x, REALPOS.y, std::max(REALSIZE.x, 5.0), std::max(REALSIZE.y, 5.0)}.translate(-m_monitor->m_position).scale(m_monitor->m_scale).translate(-m_box.pos());
+-
+-        g_pHyprOpenGL->renderRect(noScreenShareBox, Colors::BLACK, {});
+-
+-        const auto     geom            = l->m_geometry;
+-        const Vector2D popupBaseOffset = REALPOS - Vector2D{geom.pos().x, geom.pos().y};
+-        if (l->m_popupHead)
+-            l->m_popupHead->breadthfirst(hidePopups(popupBaseOffset), nullptr);
++    auto formats = m_session->allowedFormats();
++    if (formats.empty()) {
++        LOGM(Log::ERR, "No format supported by renderer in screencopy protocol");
++        m_resource->sendFailed();
++        return;
+     }
+ 
+-    for (auto const& w : g_pCompositor->m_windows) {
+-        if (!w->m_ruleApplicator->noScreenShare().valueOrDefault())
+-            continue;
+-
+-        if (!g_pHyprRenderer->shouldRenderWindow(w, m_monitor.lock()))
+-            continue;
++    DRMFormat  format  = formats.at(0);
++    auto       bufSize = m_frame->bufferSize();
+ 
+-        if (w->isHidden())
+-            continue;
++    const auto PSHMINFO = NFormatUtils::getPixelFormatFromDRM(format);
++    const auto stride   = NFormatUtils::minStride(PSHMINFO, bufSize.x);
++    m_resource->sendBuffer(NFormatUtils::drmToShm(format), bufSize.x, bufSize.y, stride);
+ 
+-        const auto PWORKSPACE = w->m_workspace;
+-
+-        if UNLIKELY (!PWORKSPACE && !w->m_fadingOut && w->m_alpha->value() != 0.f)
+-            continue;
+-
+-        const auto renderOffset     = PWORKSPACE && !w->m_pinned ? PWORKSPACE->m_renderOffset->value() : Vector2D{};
+-        const auto REALPOS          = w->m_realPosition->value() + renderOffset;
+-        const auto noScreenShareBox = CBox{REALPOS.x, REALPOS.y, std::max(w->m_realSize->value().x, 5.0), std::max(w->m_realSize->value().y, 5.0)}
+-                                          .translate(-m_monitor->m_position)
+-                                          .scale(m_monitor->m_scale)
+-                                          .translate(-m_box.pos());
+-
+-        const auto dontRound     = w->isEffectiveInternalFSMode(FSMODE_FULLSCREEN);
+-        const auto rounding      = dontRound ? 0 : w->rounding() * m_monitor->m_scale;
+-        const auto roundingPower = dontRound ? 2.0f : w->roundingPower();
+-
+-        g_pHyprOpenGL->renderRect(noScreenShareBox, Colors::BLACK, {.round = rounding, .roundingPower = roundingPower});
+-
+-        if (w->m_isX11 || !w->m_popupHead)
+-            continue;
+-
+-        const auto     geom            = w->m_xdgSurface->m_current.geometry;
+-        const Vector2D popupBaseOffset = REALPOS - Vector2D{geom.pos().x, geom.pos().y};
++    if (m_resource->version() >= 3) {
++        if LIKELY (format != DRM_FORMAT_INVALID)
++            m_resource->sendLinuxDmabuf(format, bufSize.x, bufSize.y);
+ 
+-        w->m_popupHead->breadthfirst(hidePopups(popupBaseOffset), nullptr);
++        m_resource->sendBufferDone();
+     }
+-
+-    if (m_overlayCursor)
+-        g_pPointerManager->renderSoftwareCursorsFor(m_monitor.lock(), Time::steadyNow(), fakeDamage,
+-                                                    g_pInputManager->getMouseCoordsInternal() - m_monitor->m_position - m_box.pos() / m_monitor->m_scale, true);
+ }
+ 
+-void CScreencopyFrame::storeTempFB() {
+-    g_pHyprRenderer->makeEGLCurrent();
+-
+-    m_tempFb.alloc(m_box.w, m_box.h);
+-
+-    CRegion fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
+-
+-    if (!g_pHyprRenderer->beginRender(m_monitor.lock(), fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &m_tempFb, true)) {
+-        LOGM(Log::ERR, "Can't copy: failed to begin rendering to temp fb");
++void CScreencopyFrame::shareFrame(CZwlrScreencopyFrameV1* pFrame, wl_resource* buffer, bool withDamage) {
++    if UNLIKELY (!good()) {
++        LOGM(Log::ERR, "No frame in shareFrame??");
+         return;
+     }
+ 
+-    renderMon();
+-
+-    g_pHyprRenderer->endRender();
+-}
+-
+-void CScreencopyFrame::copyDmabuf(std::function<void(bool)> callback) {
+-    const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_SCREENCOPY);
+-
+-    CRegion    fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
+-
+-    if (!g_pHyprRenderer->beginRender(m_monitor.lock(), fakeDamage, RENDER_MODE_TO_BUFFER, m_buffer.m_buffer, nullptr, true)) {
+-        LOGM(Log::ERR, "Can't copy: failed to begin rendering to dma frame");
+-        callback(false);
++    if UNLIKELY (m_buffer) {
++        LOGM(Log::ERR, "Buffer used in {:x}", (uintptr_t)this);
++        m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_ALREADY_USED, "frame already used");
++        m_resource->sendFailed();
+         return;
+     }
+ 
+-    if (PERM == PERMISSION_RULE_ALLOW_MODE_ALLOW) {
+-        if (m_tempFb.isAllocated()) {
+-            CBox texbox = {{}, m_box.size()};
+-            g_pHyprOpenGL->renderTexture(m_tempFb.getTexture(), texbox, {});
+-            m_tempFb.release();
+-        } else
+-            renderMon();
+-    } else if (PERM == PERMISSION_RULE_ALLOW_MODE_PENDING)
+-        g_pHyprOpenGL->clear(Colors::BLACK);
+-    else {
+-        g_pHyprOpenGL->clear(Colors::BLACK);
+-        CBox texbox = CBox{m_monitor->m_transformedSize / 2.F, g_pHyprOpenGL->m_screencopyDeniedTexture->m_size}.translate(-g_pHyprOpenGL->m_screencopyDeniedTexture->m_size / 2.F);
+-        g_pHyprOpenGL->renderTexture(g_pHyprOpenGL->m_screencopyDeniedTexture, texbox, {});
+-    }
+-
+-    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
+-
+-    g_pHyprRenderer->endRender([callback]() {
+-        LOGM(Log::TRACE, "Copied frame via dma");
+-        callback(true);
+-    });
+-}
+-
+-bool CScreencopyFrame::copyShm() {
+-    const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_SCREENCOPY);
+-
+-    auto       shm                = m_buffer->shm();
+-    auto [pixelData, fmt, bufLen] = m_buffer->beginDataPtr(0); // no need for end, cuz it's shm
+-
+-    CRegion fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
+-
+-    g_pHyprRenderer->makeEGLCurrent();
+-
+-    CFramebuffer fb;
+-    fb.alloc(m_box.w, m_box.h, m_monitor->m_output->state->state().drmFormat);
+-
+-    if (!g_pHyprRenderer->beginRender(m_monitor.lock(), fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &fb, true)) {
+-        LOGM(Log::ERR, "Can't copy: failed to begin rendering");
+-        return false;
+-    }
+-
+-    if (PERM == PERMISSION_RULE_ALLOW_MODE_ALLOW) {
+-        if (m_tempFb.isAllocated()) {
+-            CBox texbox = {{}, m_box.size()};
+-            g_pHyprOpenGL->renderTexture(m_tempFb.getTexture(), texbox, {});
+-            m_tempFb.release();
+-        } else
+-            renderMon();
+-    } else if (PERM == PERMISSION_RULE_ALLOW_MODE_PENDING)
+-        g_pHyprOpenGL->clear(Colors::BLACK);
+-    else {
+-        g_pHyprOpenGL->clear(Colors::BLACK);
+-        CBox texbox = CBox{m_monitor->m_transformedSize / 2.F, g_pHyprOpenGL->m_screencopyDeniedTexture->m_size}.translate(-g_pHyprOpenGL->m_screencopyDeniedTexture->m_size / 2.F);
+-        g_pHyprOpenGL->renderTexture(g_pHyprOpenGL->m_screencopyDeniedTexture, texbox, {});
+-    }
+-
+-    glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.getFBID());
+-
+-    const auto PFORMAT = NFormatUtils::getPixelFormatFromDRM(shm.format);
+-    if (!PFORMAT) {
+-        LOGM(Log::ERR, "Can't copy: failed to find a pixel format");
+-        g_pHyprRenderer->endRender();
+-        return false;
++    const auto PBUFFERRES = CWLBufferResource::fromResource(buffer);
++    if UNLIKELY (!PBUFFERRES || !PBUFFERRES->m_buffer) {
++        LOGM(Log::ERR, "Invalid buffer in {:x}", (uintptr_t)this);
++        m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer");
++        m_resource->sendFailed();
++        return;
+     }
+ 
+-    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
+-    g_pHyprRenderer->endRender();
+-
+-    g_pHyprRenderer->makeEGLCurrent();
+-    g_pHyprOpenGL->m_renderData.pMonitor = m_monitor;
+-    fb.bind();
+-
+-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
++    const auto& PBUFFER = PBUFFERRES->m_buffer.lock();
+ 
+-    uint32_t packStride = NFormatUtils::minStride(PFORMAT, m_box.w);
+-    int      glFormat   = PFORMAT->glFormat;
++    if (!withDamage)
++        g_pHyprRenderer->damageMonitor(m_session->monitor());
+ 
+-    if (glFormat == GL_RGBA)
+-        glFormat = GL_BGRA_EXT;
+-
+-    if (glFormat != GL_BGRA_EXT && glFormat != GL_RGB) {
+-        if (PFORMAT->swizzle.has_value()) {
+-            std::array<GLint, 4> RGBA = SWIZZLE_RGBA;
+-            std::array<GLint, 4> BGRA = SWIZZLE_BGRA;
+-            if (PFORMAT->swizzle == RGBA)
+-                glFormat = GL_RGBA;
+-            else if (PFORMAT->swizzle == BGRA)
+-                glFormat = GL_BGRA_EXT;
+-            else {
+-                LOGM(Log::ERR, "Copied frame via shm might be broken or color flipped");
+-                glFormat = GL_RGBA;
++    auto error = m_frame->share(PBUFFER, {}, [this, withDamage, self = m_self](eScreenshareResult result) {
++        if (self.expired() || !good())
++            return;
++        switch (result) {
++            case RESULT_COPIED: {
++                m_resource->sendFlags(sc<zwlrScreencopyFrameV1Flags>(0));
++                if (withDamage)
++                    m_frame->damage().forEachRect([&](const auto& rect) { m_resource->sendDamage(rect.x1, rect.y1, rect.x2 - rect.x1, rect.y2 - rect.y1); });
++
++                const auto [sec, nsec] = Time::secNsec(m_timestamp);
++                uint32_t tvSecHi       = (sizeof(sec) > 4) ? sec >> 32 : 0;
++                uint32_t tvSecLo       = sec & 0xFFFFFFFF;
++                m_resource->sendReady(tvSecHi, tvSecLo, nsec);
++                break;
+             }
++            case RESULT_NOT_COPIED:
++                LOGM(Log::ERR, "Frame share failed in {:x}", (uintptr_t)this);
++                m_resource->sendFailed();
++                break;
++            case RESULT_TIMESTAMP: m_timestamp = Time::steadyNow(); break;
+         }
+-    }
++    });
+ 
+-    // This could be optimized by using a pixel buffer object to make this async,
+-    // but really clients should just use a dma buffer anyways.
+-    if (packStride == sc<uint32_t>(shm.stride)) {
+-        glReadPixels(0, 0, m_box.w, m_box.h, glFormat, PFORMAT->glType, pixelData);
+-    } else {
+-        for (size_t i = 0; i < m_box.h; ++i) {
+-            uint32_t y = i;
+-            glReadPixels(0, y, m_box.w, 1, glFormat, PFORMAT->glType, pixelData + i * shm.stride);
+-        }
++    switch (error) {
++        case ERROR_NONE: m_buffer = CHLBufferReference(PBUFFER); break;
++        case ERROR_NO_BUFFER: m_resource->error(ZWLR_SCREENCOPY_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer"); break;
++        case ERROR_BUFFER_SIZE:
++        case ERROR_BUFFER_FORMAT: m_resource->sendFailed(); break;
++        case ERROR_UNKNOWN:
++        case ERROR_STOPPED: m_resource->sendFailed(); break;
+     }
+-
+-    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+-    g_pHyprOpenGL->m_renderData.pMonitor.reset();
+-
+-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+-
+-    LOGM(Log::TRACE, "Copied frame via shm");
+-
+-    return true;
+ }
+ 
+ bool CScreencopyFrame::good() {
+-    return m_resource->resource();
+-}
+-
+-CScreencopyClient::~CScreencopyClient() {
+-    g_pHookSystem->unhook(m_tickCallback);
+-}
+-
+-CScreencopyClient::CScreencopyClient(SP<CZwlrScreencopyManagerV1> resource_) : m_resource(resource_) {
+-    if UNLIKELY (!good())
+-        return;
+-
+-    m_resource->setDestroy([this](CZwlrScreencopyManagerV1* pMgr) { PROTO::screencopy->destroyResource(this); });
+-    m_resource->setOnDestroy([this](CZwlrScreencopyManagerV1* pMgr) { PROTO::screencopy->destroyResource(this); });
+-    m_resource->setCaptureOutput(
+-        [this](CZwlrScreencopyManagerV1* pMgr, uint32_t frame, int32_t overlayCursor, wl_resource* output) { this->captureOutput(frame, overlayCursor, output, {}); });
+-    m_resource->setCaptureOutputRegion([this](CZwlrScreencopyManagerV1* pMgr, uint32_t frame, int32_t overlayCursor, wl_resource* output, int32_t x, int32_t y, int32_t w,
+-                                              int32_t h) { this->captureOutput(frame, overlayCursor, output, {x, y, w, h}); });
+-
+-    m_lastMeasure.reset();
+-    m_lastFrame.reset();
+-    m_tickCallback = g_pHookSystem->hookDynamic("tick", [&](void* self, SCallbackInfo& info, std::any data) { onTick(); });
+-}
+-
+-void CScreencopyClient::captureOutput(uint32_t frame, int32_t overlayCursor_, wl_resource* output, CBox box) {
+-    const auto FRAME = PROTO::screencopy->m_frames.emplace_back(
+-        makeShared<CScreencopyFrame>(makeShared<CZwlrScreencopyFrameV1>(m_resource->client(), m_resource->version(), frame), overlayCursor_, output, box));
+-
+-    if (!FRAME->good()) {
+-        LOGM(Log::ERR, "Couldn't alloc frame for sharing! (no memory)");
+-        m_resource->noMemory();
+-        PROTO::screencopy->destroyResource(FRAME.get());
+-        return;
+-    }
+-
+-    FRAME->m_self   = FRAME;
+-    FRAME->m_client = m_self;
+-}
+-
+-void CScreencopyClient::onTick() {
+-    if (m_lastMeasure.getMillis() < 500)
+-        return;
+-
+-    m_framesInLastHalfSecond = m_frameCounter;
+-    m_frameCounter           = 0;
+-    m_lastMeasure.reset();
+-
+-    const auto LASTFRAMEDELTA = m_lastFrame.getMillis() / 1000.0;
+-    const bool FRAMEAWAITING  = std::ranges::any_of(PROTO::screencopy->m_frames, [&](const auto& frame) { return frame->m_client.get() == this; });
+-
+-    if (m_framesInLastHalfSecond > 3 && !m_sentScreencast) {
+-        EMIT_HOOK_EVENT("screencast", (std::vector<uint64_t>{1, sc<uint64_t>(m_framesInLastHalfSecond), sc<uint64_t>(m_clientOwner)}));
+-        g_pEventManager->postEvent(SHyprIPCEvent{"screencast", "1," + std::to_string(m_clientOwner)});
+-        m_sentScreencast = true;
+-    } else if (m_framesInLastHalfSecond < 4 && m_sentScreencast && LASTFRAMEDELTA > 1.0 && !FRAMEAWAITING) {
+-        EMIT_HOOK_EVENT("screencast", (std::vector<uint64_t>{0, sc<uint64_t>(m_framesInLastHalfSecond), sc<uint64_t>(m_clientOwner)}));
+-        g_pEventManager->postEvent(SHyprIPCEvent{"screencast", "0," + std::to_string(m_clientOwner)});
+-        m_sentScreencast = false;
+-    }
+-}
+-
+-bool CScreencopyClient::good() {
+-    return m_resource->resource();
+-}
+-
+-wl_client* CScreencopyClient::client() {
+-    return m_resource ? m_resource->client() : nullptr;
++    return m_resource && m_resource->resource();
+ }
+ 
+ CScreencopyProtocol::CScreencopyProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
+@@ -524,64 +181,10 @@ void CScreencopyProtocol::bindManager(wl_client* client, void* data, uint32_t ve
+ }
+ 
+ void CScreencopyProtocol::destroyResource(CScreencopyClient* client) {
+-    std::erase_if(m_clients, [&](const auto& other) { return other.get() == client; });
+     std::erase_if(m_frames, [&](const auto& other) { return other->m_client.get() == client; });
+-    std::erase_if(m_framesAwaitingWrite, [&](const auto& other) { return !other || other->m_client.get() == client; });
++    std::erase_if(m_clients, [&](const auto& other) { return other.get() == client; });
+ }
+ 
+ void CScreencopyProtocol::destroyResource(CScreencopyFrame* frame) {
+     std::erase_if(m_frames, [&](const auto& other) { return other.get() == frame; });
+-    std::erase_if(m_framesAwaitingWrite, [&](const auto& other) { return !other || other.get() == frame; });
+-}
+-
+-void CScreencopyProtocol::onOutputCommit(PHLMONITOR pMonitor) {
+-    if (m_framesAwaitingWrite.empty()) {
+-        for (auto client : m_clients) {
+-            if (client->m_framesInLastHalfSecond > 0)
+-                return;
+-        }
+-        g_pHyprRenderer->m_directScanoutBlocked = false;
+-        return; // nothing to share
+-    }
+-
+-    std::vector<WP<CScreencopyFrame>> framesToRemove;
+-    // reserve number of elements to avoid reallocations
+-    framesToRemove.reserve(m_framesAwaitingWrite.size());
+-
+-    // share frame if correct output
+-    for (auto const& f : m_framesAwaitingWrite) {
+-        if (!f)
+-            continue;
+-
+-        // check permissions
+-        const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(f->m_resource->client(), PERMISSION_TYPE_SCREENCOPY);
+-
+-        if (PERM == PERMISSION_RULE_ALLOW_MODE_PENDING) {
+-            if (!f->m_tempFb.isAllocated())
+-                f->storeTempFB(); // make a snapshot before the popup
+-
+-            continue; // pending an answer, don't do anything yet.
+-        }
+-
+-        // otherwise share. If it's denied, it will be black.
+-
+-        if (!f->m_monitor || !f->m_buffer) {
+-            framesToRemove.emplace_back(f);
+-            continue;
+-        }
+-
+-        if (f->m_monitor != pMonitor)
+-            continue;
+-
+-        f->share();
+-
+-        f->m_client->m_lastFrame.reset();
+-        ++f->m_client->m_frameCounter;
+-
+-        framesToRemove.emplace_back(f);
+-    }
+-
+-    for (auto const& f : framesToRemove) {
+-        std::erase(m_framesAwaitingWrite, f);
+-    }
+ }
+diff --git a/src/protocols/Screencopy.hpp b/src/protocols/Screencopy.hpp
+index 54b0d28c6c3..3659c75368c 100644
+--- a/src/protocols/Screencopy.hpp
++++ b/src/protocols/Screencopy.hpp
+@@ -1,25 +1,19 @@
+ #pragma once
+ 
+-#include "../defines.hpp"
+-#include "./types/Buffer.hpp"
+-#include "wlr-screencopy-unstable-v1.hpp"
+ #include "WaylandProtocol.hpp"
++#include "wlr-screencopy-unstable-v1.hpp"
+ 
+-#include <list>
+-#include <vector>
+-#include "../managers/HookSystemManager.hpp"
+-#include "../helpers/time/Timer.hpp"
+ #include "../helpers/time/Time.hpp"
+-#include "../render/Framebuffer.hpp"
+-#include "../managers/eventLoop/EventLoopTimer.hpp"
++#include "./types/Buffer.hpp"
+ #include <aquamarine/buffer/Buffer.hpp>
+ 
++#include <vector>
++
+ class CMonitor;
+ class IHLBuffer;
+-
+-enum eClientOwners {
+-    CLIENT_SCREENCOPY = 0,
+-    CLIENT_TOPLEVEL_EXPORT
++namespace Screenshare {
++    class CScreenshareSession;
++    class CScreenshareFrame;
+ };
+ 
+ class CScreencopyClient {
+@@ -27,24 +21,13 @@ class CScreencopyClient {
+     CScreencopyClient(SP<CZwlrScreencopyManagerV1> resource_);
+     ~CScreencopyClient();
+ 
+-    bool                  good();
+-    wl_client*            client();
+-
+-    WP<CScreencopyClient> m_self;
+-    eClientOwners         m_clientOwner = CLIENT_SCREENCOPY;
+-
+-    CTimer                m_lastFrame;
+-    int                   m_frameCounter = 0;
++    bool good();
+ 
+   private:
+     SP<CZwlrScreencopyManagerV1> m_resource;
++    WP<CScreencopyClient>        m_self;
+ 
+-    int                          m_framesInLastHalfSecond = 0;
+-    CTimer                       m_lastMeasure;
+-    bool                         m_sentScreencast = false;
+-
+-    SP<HOOK_CALLBACK_FN>         m_tickCallback;
+-    void                         onTick();
++    wl_client*                   m_savedClient = nullptr;
+ 
+     void                         captureOutput(uint32_t frame, int32_t overlayCursor, wl_resource* output, CBox box);
+ 
+@@ -53,38 +36,30 @@ class CScreencopyClient {
+ 
+ class CScreencopyFrame {
+   public:
+-    CScreencopyFrame(SP<CZwlrScreencopyFrameV1> resource, int32_t overlay_cursor, wl_resource* output, CBox box);
+-
+-    bool                  good();
++    CScreencopyFrame(SP<CZwlrScreencopyFrameV1> resource, WP<Screenshare::CScreenshareSession> session, bool overlayCursor);
+ 
+-    WP<CScreencopyFrame>  m_self;
+-    WP<CScreencopyClient> m_client;
++    bool good();
+ 
+   private:
+-    SP<CZwlrScreencopyFrameV1> m_resource;
++    SP<CZwlrScreencopyFrameV1>           m_resource;
++    WP<CScreencopyFrame>                 m_self;
++    WP<CScreencopyClient>                m_client;
+ 
+-    PHLMONITORREF              m_monitor;
+-    bool                       m_overlayCursor = false;
+-    bool                       m_withDamage    = false;
++    WP<Screenshare::CScreenshareSession> m_session;
++    UP<Screenshare::CScreenshareFrame>   m_frame;
+ 
+-    CHLBufferReference         m_buffer;
+-    bool                       m_bufferDMA    = false;
+-    uint32_t                   m_shmFormat    = 0;
+-    uint32_t                   m_dmabufFormat = 0;
+-    int                        m_shmStride    = 0;
+-    CBox                       m_box          = {};
++    CHLBufferReference                   m_buffer;
++    Time::steady_tp                      m_timestamp;
++    bool                                 m_overlayCursor = true;
+ 
+-    // if we have a pending perm, hold the buffer.
+-    CFramebuffer m_tempFb;
++    struct {
++        CHyprSignalListener stopped;
++    } m_listeners;
+ 
+-    void         copy(CZwlrScreencopyFrameV1* pFrame, wl_resource* buffer);
+-    void         copyDmabuf(std::function<void(bool)> callback);
+-    bool         copyShm();
+-    void         renderMon();
+-    void         storeTempFB();
+-    void         share();
++    void shareFrame(CZwlrScreencopyFrameV1* pFrame, wl_resource* buffer, bool withDamage);
+ 
+     friend class CScreencopyProtocol;
++    friend class CScreencopyClient;
+ };
+ 
+ class CScreencopyProtocol : public IWaylandProtocol {
+@@ -95,21 +70,10 @@ class CScreencopyProtocol : public IWaylandProtocol {
+     void         destroyResource(CScreencopyClient* resource);
+     void         destroyResource(CScreencopyFrame* resource);
+ 
+-    void         onOutputCommit(PHLMONITOR pMonitor);
+-
+   private:
+     std::vector<SP<CScreencopyFrame>>  m_frames;
+-    std::vector<WP<CScreencopyFrame>>  m_framesAwaitingWrite;
+     std::vector<SP<CScreencopyClient>> m_clients;
+ 
+-    void                               shareAllFrames(PHLMONITOR pMonitor);
+-    void                               shareFrame(CScreencopyFrame* frame);
+-    void                               sendFrameDamage(CScreencopyFrame* frame);
+-    bool                               copyFrameDmabuf(CScreencopyFrame* frame);
+-    bool                               copyFrameShm(CScreencopyFrame* frame, const Time::steady_tp& now);
+-
+-    uint32_t                           drmFormatForMonitor(PHLMONITOR pMonitor);
+-
+     friend class CScreencopyFrame;
+     friend class CScreencopyClient;
+ };
+diff --git a/src/protocols/ToplevelExport.cpp b/src/protocols/ToplevelExport.cpp
+index b223f778667..3b8973abc52 100644
+--- a/src/protocols/ToplevelExport.cpp
++++ b/src/protocols/ToplevelExport.cpp
+@@ -1,41 +1,44 @@
+ #include "ToplevelExport.hpp"
+ #include "../Compositor.hpp"
+ #include "ForeignToplevelWlr.hpp"
+-#include "../managers/PointerManager.hpp"
+-#include "../managers/SeatManager.hpp"
+-#include "types/WLBuffer.hpp"
+-#include "types/Buffer.hpp"
++#include "../managers/screenshare/ScreenshareManager.hpp"
++#include "../managers/HookSystemManager.hpp"
+ #include "../helpers/Format.hpp"
+-#include "../managers/EventManager.hpp"
+-#include "../managers/input/InputManager.hpp"
+-#include "../managers/permissions/DynamicPermissionManager.hpp"
+ #include "../render/Renderer.hpp"
+ 
+-#include <algorithm>
+ #include <hyprutils/math/Vector2D.hpp>
+ 
++using namespace Screenshare;
++
+ CToplevelExportClient::CToplevelExportClient(SP<CHyprlandToplevelExportManagerV1> resource_) : m_resource(resource_) {
+     if UNLIKELY (!good())
+         return;
+ 
+-    m_resource->setOnDestroy([this](CHyprlandToplevelExportManagerV1* pMgr) { PROTO::toplevelExport->destroyResource(this); });
++    m_resource->setOnDestroy([this](CHyprlandToplevelExportManagerV1* pMgr) {
++        Screenshare::mgr()->destroyClientSessions(m_savedClient);
++        PROTO::toplevelExport->destroyResource(this);
++    });
+     m_resource->setDestroy([this](CHyprlandToplevelExportManagerV1* pMgr) { PROTO::toplevelExport->destroyResource(this); });
+     m_resource->setCaptureToplevel([this](CHyprlandToplevelExportManagerV1* pMgr, uint32_t frame, int32_t overlayCursor, uint32_t handle) {
+-        this->captureToplevel(pMgr, frame, overlayCursor, g_pCompositor->getWindowFromHandle(handle));
++        captureToplevel(frame, overlayCursor, g_pCompositor->getWindowFromHandle(handle));
+     });
+     m_resource->setCaptureToplevelWithWlrToplevelHandle([this](CHyprlandToplevelExportManagerV1* pMgr, uint32_t frame, int32_t overlayCursor, wl_resource* handle) {
+-        this->captureToplevel(pMgr, frame, overlayCursor, PROTO::foreignToplevelWlr->windowFromHandleResource(handle));
++        captureToplevel(frame, overlayCursor, PROTO::foreignToplevelWlr->windowFromHandleResource(handle));
+     });
+ 
+-    m_lastMeasure.reset();
+-    m_lastFrame.reset();
+-    m_tickCallback = g_pHookSystem->hookDynamic("tick", [&](void* self, SCallbackInfo& info, std::any data) { onTick(); });
++    m_savedClient = m_resource->client();
++}
++
++CToplevelExportClient::~CToplevelExportClient() {
++    Screenshare::mgr()->destroyClientSessions(m_savedClient);
+ }
+ 
+-void CToplevelExportClient::captureToplevel(CHyprlandToplevelExportManagerV1* pMgr, uint32_t frame, int32_t overlayCursor_, PHLWINDOW handle) {
++void CToplevelExportClient::captureToplevel(uint32_t frame, int32_t overlayCursor_, PHLWINDOW handle) {
++    auto session = Screenshare::mgr()->getManagedSession(m_resource->client(), handle);
++
+     // create a frame
+     const auto FRAME = PROTO::toplevelExport->m_frames.emplace_back(
+-        makeShared<CToplevelExportFrame>(makeShared<CHyprlandToplevelExportFrameV1>(m_resource->client(), m_resource->version(), frame), overlayCursor_, handle));
++        makeShared<CToplevelExportFrame>(makeShared<CHyprlandToplevelExportFrameV1>(m_resource->client(), m_resource->version(), frame), session, !!overlayCursor_));
+ 
+     if UNLIKELY (!FRAME->good()) {
+         LOGM(Log::ERR, "Couldn't alloc frame for sharing! (no memory)");
+@@ -44,370 +47,115 @@ void CToplevelExportClient::captureToplevel(CHyprlandToplevelExportManagerV1* pM
+         return;
+     }
+ 
+-    FRAME->m_self   = FRAME;
+     FRAME->m_client = m_self;
+-}
+-
+-void CToplevelExportClient::onTick() {
+-    if (m_lastMeasure.getMillis() < 500)
+-        return;
+-
+-    m_framesInLastHalfSecond = m_frameCounter;
+-    m_frameCounter           = 0;
+-    m_lastMeasure.reset();
+-
+-    const auto LASTFRAMEDELTA = m_lastFrame.getMillis() / 1000.0;
+-    const bool FRAMEAWAITING  = std::ranges::any_of(PROTO::toplevelExport->m_frames, [&](const auto& frame) { return frame->m_client.get() == this; });
+-
+-    if (m_framesInLastHalfSecond > 3 && !m_sentScreencast) {
+-        EMIT_HOOK_EVENT("screencast", (std::vector<uint64_t>{1, sc<uint64_t>(m_framesInLastHalfSecond), sc<uint64_t>(m_clientOwner)}));
+-        g_pEventManager->postEvent(SHyprIPCEvent{"screencast", "1," + std::to_string(m_clientOwner)});
+-        m_sentScreencast = true;
+-    } else if (m_framesInLastHalfSecond < 4 && m_sentScreencast && LASTFRAMEDELTA > 1.0 && !FRAMEAWAITING) {
+-        EMIT_HOOK_EVENT("screencast", (std::vector<uint64_t>{0, sc<uint64_t>(m_framesInLastHalfSecond), sc<uint64_t>(m_clientOwner)}));
+-        g_pEventManager->postEvent(SHyprIPCEvent{"screencast", "0," + std::to_string(m_clientOwner)});
+-        m_sentScreencast = false;
+-    }
++    FRAME->m_self   = FRAME;
+ }
+ 
+ bool CToplevelExportClient::good() {
+-    return m_resource->resource();
++    return m_resource && m_resource->resource();
+ }
+ 
+-CToplevelExportFrame::CToplevelExportFrame(SP<CHyprlandToplevelExportFrameV1> resource_, int32_t overlayCursor_, PHLWINDOW pWindow_) : m_resource(resource_), m_window(pWindow_) {
++CToplevelExportFrame::CToplevelExportFrame(SP<CHyprlandToplevelExportFrameV1> resource_, WP<CScreenshareSession> session, bool overlayCursor) :
++    m_resource(resource_), m_session(session) {
+     if UNLIKELY (!good())
+         return;
+ 
+-    m_cursorOverlayRequested = !!overlayCursor_;
+-
+-    if UNLIKELY (!m_window) {
+-        LOGM(Log::ERR, "Client requested sharing of window handle {:x} which does not exist!", m_window);
+-        m_resource->sendFailed();
+-        return;
+-    }
+-
+-    if UNLIKELY (!m_window->m_isMapped) {
+-        LOGM(Log::ERR, "Client requested sharing of window handle {:x} which is not shareable!", m_window);
+-        m_resource->sendFailed();
+-        return;
+-    }
+-
+     m_resource->setOnDestroy([this](CHyprlandToplevelExportFrameV1* pFrame) { PROTO::toplevelExport->destroyResource(this); });
+     m_resource->setDestroy([this](CHyprlandToplevelExportFrameV1* pFrame) { PROTO::toplevelExport->destroyResource(this); });
+-    m_resource->setCopy([this](CHyprlandToplevelExportFrameV1* pFrame, wl_resource* res, int32_t ignoreDamage) { this->copy(pFrame, res, ignoreDamage); });
+-
+-    const auto PMONITOR = m_window->m_monitor.lock();
++    m_resource->setCopy([this](CHyprlandToplevelExportFrameV1* pFrame, wl_resource* res, int32_t ignoreDamage) { shareFrame(res, !!ignoreDamage); });
+ 
+-    g_pHyprRenderer->makeEGLCurrent();
++    m_listeners.stopped = m_session->m_events.stopped.listen([this]() {
++        if (good())
++            m_resource->sendFailed();
++    });
+ 
+-    m_shmFormat = NFormatUtils::alphaFormat(g_pHyprOpenGL->getPreferredReadFormat(PMONITOR));
+-    LOGM(Log::DEBUG, "Format {:x}", m_shmFormat);
+-    //m_shmFormat = NFormatUtils::alphaFormat(m_shmFormat);
+-    if UNLIKELY (m_shmFormat == DRM_FORMAT_INVALID) {
+-        LOGM(Log::ERR, "No format supported by renderer in capture toplevel");
+-        m_resource->sendFailed();
+-        return;
+-    }
++    m_frame = m_session->nextFrame(overlayCursor);
+ 
+-    const auto PSHMINFO = NFormatUtils::getPixelFormatFromDRM(m_shmFormat);
+-    if UNLIKELY (!PSHMINFO) {
+-        LOGM(Log::ERR, "No pixel format supported by renderer in capture toplevel");
++    auto formats = m_session->allowedFormats();
++    if (formats.empty()) {
++        LOGM(Log::ERR, "No format supported by renderer in toplevel export protocol");
+         m_resource->sendFailed();
+         return;
+     }
+ 
+-    m_dmabufFormat = NFormatUtils::alphaFormat(g_pHyprOpenGL->getPreferredReadFormat(PMONITOR));
+-
+-    m_box = {0, 0, sc<int>(m_window->m_realSize->value().x * PMONITOR->m_scale), sc<int>(m_window->m_realSize->value().y * PMONITOR->m_scale)};
+-
+-    m_box.transform(Math::wlTransformToHyprutils(PMONITOR->m_transform), PMONITOR->m_transformedSize.x, PMONITOR->m_transformedSize.y).round();
++    DRMFormat  format  = formats.at(0);
++    auto       bufSize = m_frame->bufferSize();
+ 
+-    m_shmStride = NFormatUtils::minStride(PSHMINFO, m_box.w);
++    const auto PSHMINFO = NFormatUtils::getPixelFormatFromDRM(format);
++    const auto stride   = NFormatUtils::minStride(PSHMINFO, bufSize.x);
++    m_resource->sendBuffer(NFormatUtils::drmToShm(format), bufSize.x, bufSize.y, stride);
+ 
+-    m_resource->sendBuffer(NFormatUtils::drmToShm(m_shmFormat), m_box.width, m_box.height, m_shmStride);
+-
+-    if LIKELY (m_dmabufFormat != DRM_FORMAT_INVALID)
+-        m_resource->sendLinuxDmabuf(m_dmabufFormat, m_box.width, m_box.height);
++    if LIKELY (format != DRM_FORMAT_INVALID)
++        m_resource->sendLinuxDmabuf(format, bufSize.x, bufSize.y);
+ 
+     m_resource->sendBufferDone();
+ }
+ 
+-void CToplevelExportFrame::copy(CHyprlandToplevelExportFrameV1* pFrame, wl_resource* buffer_, int32_t ignoreDamage) {
+-    if UNLIKELY (!good()) {
+-        LOGM(Log::ERR, "No frame in copyFrame??");
+-        return;
+-    }
+-
+-    if UNLIKELY (!validMapped(m_window)) {
+-        LOGM(Log::ERR, "Client requested sharing of window handle {:x} which is gone!", m_window);
+-        m_resource->sendFailed();
+-        return;
+-    }
+-
+-    if UNLIKELY (!m_window->m_isMapped) {
+-        LOGM(Log::ERR, "Client requested sharing of window handle {:x} which is not shareable (2)!", m_window);
+-        m_resource->sendFailed();
+-        return;
+-    }
+-
+-    const auto PBUFFER = CWLBufferResource::fromResource(buffer_);
+-    if UNLIKELY (!PBUFFER) {
+-        m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer");
+-        PROTO::toplevelExport->destroyResource(this);
+-        return;
+-    }
++bool CToplevelExportFrame::good() {
++    return m_resource && m_resource->resource();
++}
+ 
+-    if UNLIKELY (PBUFFER->m_buffer->size != m_box.size()) {
+-        m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer dimensions");
+-        PROTO::toplevelExport->destroyResource(this);
++void CToplevelExportFrame::shareFrame(wl_resource* buffer, bool ignoreDamage) {
++    if UNLIKELY (!good()) {
++        LOGM(Log::ERR, "No frame in shareFrame??");
+         return;
+     }
+ 
+     if UNLIKELY (m_buffer) {
++        LOGM(Log::ERR, "Buffer used in {:x}", (uintptr_t)this);
+         m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_ALREADY_USED, "frame already used");
+-        PROTO::toplevelExport->destroyResource(this);
++        m_resource->sendFailed();
+         return;
+     }
+ 
+-    if (auto attrs = PBUFFER->m_buffer->dmabuf(); attrs.success) {
+-        m_bufferDMA = true;
+-
+-        if (attrs.format != m_dmabufFormat) {
+-            m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer format");
+-            PROTO::toplevelExport->destroyResource(this);
+-            return;
+-        }
+-    } else if (auto attrs = PBUFFER->m_buffer->shm(); attrs.success) {
+-        if (attrs.format != m_shmFormat) {
+-            m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer format");
+-            PROTO::toplevelExport->destroyResource(this);
+-            return;
+-        } else if (attrs.stride != m_shmStride) {
+-            m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer stride");
+-            PROTO::toplevelExport->destroyResource(this);
+-            return;
+-        }
+-    } else {
+-        m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer type");
+-        PROTO::toplevelExport->destroyResource(this);
++    const auto PBUFFERRES = CWLBufferResource::fromResource(buffer);
++    if UNLIKELY (!PBUFFERRES || !PBUFFERRES->m_buffer) {
++        LOGM(Log::ERR, "Invalid buffer in {:x}", (uintptr_t)this);
++        m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer");
++        m_resource->sendFailed();
+         return;
+     }
+ 
+-    m_buffer = CHLBufferReference(PBUFFER->m_buffer.lock());
+-
+-    m_ignoreDamage = ignoreDamage;
+-
+-    if (ignoreDamage && validMapped(m_window))
+-        share();
+-    else
+-        PROTO::toplevelExport->m_framesAwaitingWrite.emplace_back(m_self);
+-}
++    const auto& PBUFFER = PBUFFERRES->m_buffer.lock();
+ 
+-void CToplevelExportFrame::share() {
+-    if (!m_buffer || !validMapped(m_window))
+-        return;
++    if (ignoreDamage)
++        g_pHyprRenderer->damageMonitor(m_session->monitor());
+ 
+-    if (m_bufferDMA) {
+-        if (!copyDmabuf(Time::steadyNow())) {
+-            m_resource->sendFailed();
++    auto error = m_frame->share(PBUFFER, {}, [this, ignoreDamage, self = m_self](eScreenshareResult result) {
++        if (self.expired() || !good())
+             return;
+-        }
+-    } else {
+-        if (!copyShm(Time::steadyNow())) {
+-            m_resource->sendFailed();
+-            return;
+-        }
+-    }
+-
+-    m_resource->sendFlags(sc<hyprlandToplevelExportFrameV1Flags>(0));
+-
+-    if (!m_ignoreDamage)
+-        m_resource->sendDamage(0, 0, m_box.width, m_box.height);
+-
+-    const auto [sec, nsec] = Time::secNsec(Time::steadyNow());
+-
+-    uint32_t tvSecHi = (sizeof(sec) > 4) ? sec >> 32 : 0;
+-    uint32_t tvSecLo = sec & 0xFFFFFFFF;
+-    m_resource->sendReady(tvSecHi, tvSecLo, nsec);
+-}
+-
+-bool CToplevelExportFrame::copyShm(const Time::steady_tp& now) {
+-    const auto PERM               = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_SCREENCOPY);
+-    auto       shm                = m_buffer->shm();
+-    auto [pixelData, fmt, bufLen] = m_buffer->beginDataPtr(0); // no need for end, cuz it's shm
+-
+-    // render the client
+-    const auto PMONITOR = m_window->m_monitor.lock();
+-    CRegion    fakeDamage{0, 0, PMONITOR->m_pixelSize.x * 10, PMONITOR->m_pixelSize.y * 10};
+-
+-    g_pHyprRenderer->makeEGLCurrent();
+-
+-    CFramebuffer outFB;
+-    outFB.alloc(PMONITOR->m_pixelSize.x, PMONITOR->m_pixelSize.y, PMONITOR->m_output->state->state().drmFormat);
+-
+-    auto overlayCursor = shouldOverlayCursor();
+-
+-    if (overlayCursor) {
+-        g_pPointerManager->lockSoftwareForMonitor(PMONITOR->m_self.lock());
+-        g_pPointerManager->damageCursor(PMONITOR->m_self.lock());
+-    }
+-
+-    if (!g_pHyprRenderer->beginRender(PMONITOR, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &outFB))
+-        return false;
+-
+-    g_pHyprOpenGL->clear(CHyprColor(0, 0, 0, 0));
+-
+-    // render client at 0,0
+-    if (PERM == PERMISSION_RULE_ALLOW_MODE_ALLOW) {
+-        if (!m_window->m_ruleApplicator->noScreenShare().valueOrDefault()) {
+-            g_pHyprRenderer->m_bBlockSurfaceFeedback = g_pHyprRenderer->shouldRenderWindow(m_window); // block the feedback to avoid spamming the surface if it's visible
+-            g_pHyprRenderer->renderWindow(m_window, PMONITOR, now, false, RENDER_PASS_ALL, true, true);
+-            g_pHyprRenderer->m_bBlockSurfaceFeedback = false;
+-        }
+-        if (overlayCursor)
+-            g_pPointerManager->renderSoftwareCursorsFor(PMONITOR->m_self.lock(), now, fakeDamage, g_pInputManager->getMouseCoordsInternal() - m_window->m_realPosition->value());
+-    } else if (PERM == PERMISSION_RULE_ALLOW_MODE_DENY) {
+-        CBox texbox = CBox{PMONITOR->m_transformedSize / 2.F, g_pHyprOpenGL->m_screencopyDeniedTexture->m_size}.translate(-g_pHyprOpenGL->m_screencopyDeniedTexture->m_size / 2.F);
+-        g_pHyprOpenGL->renderTexture(g_pHyprOpenGL->m_screencopyDeniedTexture, texbox, {});
+-    }
+-
+-    const auto PFORMAT = NFormatUtils::getPixelFormatFromDRM(shm.format);
+-    if (!PFORMAT) {
+-        g_pHyprRenderer->endRender();
+-        return false;
+-    }
+-
+-    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
+-    g_pHyprRenderer->endRender();
+-
+-    g_pHyprRenderer->makeEGLCurrent();
+-    g_pHyprOpenGL->m_renderData.pMonitor = PMONITOR;
+-    outFB.bind();
+-
+-    glBindFramebuffer(GL_READ_FRAMEBUFFER, outFB.getFBID());
+-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+-
+-    auto origin = Vector2D(0, 0);
+-    switch (PMONITOR->m_transform) {
+-        case WL_OUTPUT_TRANSFORM_FLIPPED_180:
+-        case WL_OUTPUT_TRANSFORM_90: {
+-            origin.y = PMONITOR->m_pixelSize.y - m_box.height;
+-            break;
+-        }
+-        case WL_OUTPUT_TRANSFORM_FLIPPED_270:
+-        case WL_OUTPUT_TRANSFORM_180: {
+-            origin.x = PMONITOR->m_pixelSize.x - m_box.width;
+-            origin.y = PMONITOR->m_pixelSize.y - m_box.height;
+-            break;
+-        }
+-        case WL_OUTPUT_TRANSFORM_FLIPPED:
+-        case WL_OUTPUT_TRANSFORM_270: {
+-            origin.x = PMONITOR->m_pixelSize.x - m_box.width;
+-            break;
+-        }
+-        default: break;
+-    }
+-
+-    int glFormat = PFORMAT->glFormat;
+-
+-    if (glFormat == GL_RGBA)
+-        glFormat = GL_BGRA_EXT;
+-
+-    if (glFormat != GL_BGRA_EXT && glFormat != GL_RGB) {
+-        if (PFORMAT->swizzle.has_value()) {
+-            std::array<GLint, 4> RGBA = SWIZZLE_RGBA;
+-            std::array<GLint, 4> BGRA = SWIZZLE_BGRA;
+-            if (PFORMAT->swizzle == RGBA)
+-                glFormat = GL_RGBA;
+-            else if (PFORMAT->swizzle == BGRA)
+-                glFormat = GL_BGRA_EXT;
+-            else {
+-                LOGM(Log::ERR, "Copied frame via shm might be broken or color flipped");
+-                glFormat = GL_RGBA;
++        switch (result) {
++            case RESULT_COPIED: {
++                m_resource->sendFlags(sc<hyprlandToplevelExportFrameV1Flags>(0));
++                if (!ignoreDamage)
++                    m_frame->damage().forEachRect([&](const auto& rect) { m_resource->sendDamage(rect.x1, rect.y1, rect.x2 - rect.x1, rect.y2 - rect.y1); });
++
++                const auto [sec, nsec] = Time::secNsec(m_timestamp);
++                uint32_t tvSecHi       = (sizeof(sec) > 4) ? sec >> 32 : 0;
++                uint32_t tvSecLo       = sec & 0xFFFFFFFF;
++                m_resource->sendReady(tvSecHi, tvSecLo, nsec);
++                break;
+             }
++            case RESULT_NOT_COPIED:
++                LOGM(Log::ERR, "Frame share failed in {:x}", (uintptr_t)this);
++                m_resource->sendFailed();
++                break;
++            case RESULT_TIMESTAMP: m_timestamp = Time::steadyNow(); break;
+         }
+-    }
+-
+-    glReadPixels(origin.x, origin.y, m_box.width, m_box.height, glFormat, PFORMAT->glType, pixelData);
+-
+-    if (overlayCursor) {
+-        g_pPointerManager->unlockSoftwareForMonitor(PMONITOR->m_self.lock());
+-        g_pPointerManager->damageCursor(PMONITOR->m_self.lock());
+-    }
+-
+-    outFB.unbind();
+-    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+-
+-    return true;
+-}
+-
+-bool CToplevelExportFrame::copyDmabuf(const Time::steady_tp& now) {
+-    const auto PERM     = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_SCREENCOPY);
+-    const auto PMONITOR = m_window->m_monitor.lock();
+-
+-    CRegion    fakeDamage{0, 0, INT16_MAX, INT16_MAX};
+-
+-    auto       overlayCursor = shouldOverlayCursor();
+-
+-    if (overlayCursor) {
+-        g_pPointerManager->lockSoftwareForMonitor(PMONITOR->m_self.lock());
+-        g_pPointerManager->damageCursor(PMONITOR->m_self.lock());
+-    }
+-
+-    if (!g_pHyprRenderer->beginRender(PMONITOR, fakeDamage, RENDER_MODE_TO_BUFFER, m_buffer.m_buffer))
+-        return false;
+-
+-    g_pHyprOpenGL->clear(CHyprColor(0, 0, 0, 0));
+-    if (PERM == PERMISSION_RULE_ALLOW_MODE_ALLOW) {
+-        if (!m_window->m_ruleApplicator->noScreenShare().valueOrDefault()) {
+-            g_pHyprRenderer->m_bBlockSurfaceFeedback = g_pHyprRenderer->shouldRenderWindow(m_window); // block the feedback to avoid spamming the surface if it's visible
+-            g_pHyprRenderer->renderWindow(m_window, PMONITOR, now, false, RENDER_PASS_ALL, true, true);
+-            g_pHyprRenderer->m_bBlockSurfaceFeedback = false;
+-        }
+-
+-        if (overlayCursor)
+-            g_pPointerManager->renderSoftwareCursorsFor(PMONITOR->m_self.lock(), now, fakeDamage, g_pInputManager->getMouseCoordsInternal() - m_window->m_realPosition->value());
+-    } else if (PERM == PERMISSION_RULE_ALLOW_MODE_DENY) {
+-        CBox texbox = CBox{PMONITOR->m_transformedSize / 2.F, g_pHyprOpenGL->m_screencopyDeniedTexture->m_size}.translate(-g_pHyprOpenGL->m_screencopyDeniedTexture->m_size / 2.F);
+-        g_pHyprOpenGL->renderTexture(g_pHyprOpenGL->m_screencopyDeniedTexture, texbox, {});
+-    }
+-
+-    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
+-    g_pHyprRenderer->endRender();
++    });
+ 
+-    if (overlayCursor) {
+-        g_pPointerManager->unlockSoftwareForMonitor(PMONITOR->m_self.lock());
+-        g_pPointerManager->damageCursor(PMONITOR->m_self.lock());
++    switch (error) {
++        case ERROR_NONE: m_buffer = CHLBufferReference(PBUFFER); break;
++        case ERROR_NO_BUFFER: m_resource->error(HYPRLAND_TOPLEVEL_EXPORT_FRAME_V1_ERROR_INVALID_BUFFER, "invalid buffer"); break;
++        case ERROR_BUFFER_SIZE:
++        case ERROR_BUFFER_FORMAT: m_resource->sendFailed(); break;
++        case ERROR_UNKNOWN:
++        case ERROR_STOPPED: m_resource->sendFailed(); break;
+     }
+-
+-    return true;
+-}
+-
+-bool CToplevelExportFrame::shouldOverlayCursor() const {
+-    if (!m_cursorOverlayRequested)
+-        return false;
+-
+-    auto pointerSurfaceResource = g_pSeatManager->m_state.pointerFocus.lock();
+-
+-    if (!pointerSurfaceResource)
+-        return false;
+-
+-    auto pointerSurface = Desktop::View::CWLSurface::fromResource(pointerSurfaceResource);
+-
+-    return pointerSurface && Desktop::View::CWindow::fromView(pointerSurface->view()) == m_window;
+-}
+-
+-bool CToplevelExportFrame::good() {
+-    return m_resource->resource();
+ }
+ 
+ CToplevelExportProtocol::CToplevelExportProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
+-    static auto P1 = g_pHookSystem->hookDynamic("closeWindow", [this](void* self, SCallbackInfo& info, std::any data) {
+-        auto window = std::any_cast<PHLWINDOW>(data);
+-
+-        onWindowUnmap(window);
+-    });
++    ;
+ }
+ 
+ void CToplevelExportProtocol::bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id) {
+@@ -426,69 +174,10 @@ void CToplevelExportProtocol::bindManager(wl_client* client, void* data, uint32_
+ }
+ 
+ void CToplevelExportProtocol::destroyResource(CToplevelExportClient* client) {
+-    std::erase_if(m_clients, [&](const auto& other) { return other.get() == client; });
+     std::erase_if(m_frames, [&](const auto& other) { return other->m_client.get() == client; });
+-    std::erase_if(m_framesAwaitingWrite, [&](const auto& other) { return !other || other->m_client.get() == client; });
++    std::erase_if(m_clients, [&](const auto& other) { return other.get() == client; });
+ }
+ 
+ void CToplevelExportProtocol::destroyResource(CToplevelExportFrame* frame) {
+     std::erase_if(m_frames, [&](const auto& other) { return other.get() == frame; });
+-    std::erase_if(m_framesAwaitingWrite, [&](const auto& other) { return !other || other.get() == frame; });
+-}
+-
+-void CToplevelExportProtocol::onOutputCommit(PHLMONITOR pMonitor) {
+-    if (m_framesAwaitingWrite.empty())
+-        return; // nothing to share
+-
+-    std::vector<WP<CToplevelExportFrame>> framesToRemove;
+-    // reserve number of elements to avoid reallocations
+-    framesToRemove.reserve(m_framesAwaitingWrite.size());
+-
+-    // share frame if correct output
+-    for (auto const& f : m_framesAwaitingWrite) {
+-        if (!f)
+-            continue;
+-
+-        // check permissions
+-        const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(f->m_resource->client(), PERMISSION_TYPE_SCREENCOPY);
+-
+-        if (PERM == PERMISSION_RULE_ALLOW_MODE_PENDING)
+-            continue; // pending an answer, don't do anything yet.
+-
+-        if (!validMapped(f->m_window)) {
+-            framesToRemove.emplace_back(f);
+-            continue;
+-        }
+-
+-        if (!f->m_window)
+-            continue;
+-
+-        const auto PWINDOW = f->m_window;
+-
+-        if (pMonitor != PWINDOW->m_monitor.lock())
+-            continue;
+-
+-        CBox geometry = {PWINDOW->m_realPosition->value().x, PWINDOW->m_realPosition->value().y, PWINDOW->m_realSize->value().x, PWINDOW->m_realSize->value().y};
+-
+-        if (geometry.intersection({pMonitor->m_position, pMonitor->m_size}).empty())
+-            continue;
+-
+-        f->share();
+-
+-        f->m_client->m_lastFrame.reset();
+-        ++f->m_client->m_frameCounter;
+-
+-        framesToRemove.push_back(f);
+-    }
+-
+-    for (auto const& f : framesToRemove) {
+-        std::erase(m_framesAwaitingWrite, f);
+-    }
+-}
+-
+-void CToplevelExportProtocol::onWindowUnmap(PHLWINDOW pWindow) {
+-    for (auto const& f : m_frames) {
+-        if (f->m_window == pWindow)
+-            f->m_window.reset();
+-    }
+ }
+diff --git a/src/protocols/ToplevelExport.hpp b/src/protocols/ToplevelExport.hpp
+index 44704d844f0..38dec784625 100644
+--- a/src/protocols/ToplevelExport.hpp
++++ b/src/protocols/ToplevelExport.hpp
+@@ -1,72 +1,63 @@
+ #pragma once
+ 
+-#include "../defines.hpp"
+-#include "hyprland-toplevel-export-v1.hpp"
+ #include "WaylandProtocol.hpp"
+-#include "Screencopy.hpp"
++#include "hyprland-toplevel-export-v1.hpp"
++
+ #include "../helpers/time/Time.hpp"
++#include "./types/Buffer.hpp"
++#include <aquamarine/buffer/Buffer.hpp>
+ 
+ #include <vector>
+ 
+ class CMonitor;
++namespace Screenshare {
++    class CScreenshareSession;
++    class CScreenshareFrame;
++};
+ 
+ class CToplevelExportClient {
+   public:
+     CToplevelExportClient(SP<CHyprlandToplevelExportManagerV1> resource_);
++    ~CToplevelExportClient();
+ 
+-    bool                      good();
+-
+-    WP<CToplevelExportClient> m_self;
+-    eClientOwners             m_clientOwner = CLIENT_TOPLEVEL_EXPORT;
+-
+-    CTimer                    m_lastFrame;
+-    int                       m_frameCounter = 0;
++    bool good();
+ 
+   private:
+     SP<CHyprlandToplevelExportManagerV1> m_resource;
++    WP<CToplevelExportClient>            m_self;
+ 
+-    int                                  m_framesInLastHalfSecond = 0;
+-    CTimer                               m_lastMeasure;
+-    bool                                 m_sentScreencast = false;
++    wl_client*                           m_savedClient = nullptr;
+ 
+-    SP<HOOK_CALLBACK_FN>                 m_tickCallback;
+-    void                                 onTick();
+-
+-    void                                 captureToplevel(CHyprlandToplevelExportManagerV1* pMgr, uint32_t frame, int32_t overlayCursor, PHLWINDOW handle);
++    void                                 captureToplevel(uint32_t frame, int32_t overlayCursor, PHLWINDOW handle);
+ 
+     friend class CToplevelExportProtocol;
+ };
+ 
+ class CToplevelExportFrame {
+   public:
+-    CToplevelExportFrame(SP<CHyprlandToplevelExportFrameV1> resource_, int32_t overlayCursor, PHLWINDOW pWindow);
+-
+-    bool                      good();
++    CToplevelExportFrame(SP<CHyprlandToplevelExportFrameV1> resource, WP<Screenshare::CScreenshareSession> session, bool overlayCursor);
+ 
+-    WP<CToplevelExportFrame>  m_self;
+-    WP<CToplevelExportClient> m_client;
++    bool good();
+ 
+   private:
+-    SP<CHyprlandToplevelExportFrameV1> m_resource;
++    SP<CHyprlandToplevelExportFrameV1>   m_resource;
++    WP<CToplevelExportFrame>             m_self;
++    WP<CToplevelExportClient>            m_client;
++
++    WP<Screenshare::CScreenshareSession> m_session;
++    UP<Screenshare::CScreenshareFrame>   m_frame;
+ 
+-    PHLWINDOW                          m_window;
+-    bool                               m_cursorOverlayRequested = false;
+-    bool                               m_ignoreDamage           = false;
++    CHLBufferReference                   m_buffer;
++    Time::steady_tp                      m_timestamp;
+ 
+-    CHLBufferReference                 m_buffer;
+-    bool                               m_bufferDMA    = false;
+-    uint32_t                           m_shmFormat    = 0;
+-    uint32_t                           m_dmabufFormat = 0;
+-    int                                m_shmStride    = 0;
+-    CBox                               m_box          = {};
++    struct {
++        CHyprSignalListener stopped;
++    } m_listeners;
+ 
+-    void                               copy(CHyprlandToplevelExportFrameV1* pFrame, wl_resource* buffer, int32_t ignoreDamage);
+-    bool                               copyDmabuf(const Time::steady_tp& now);
+-    bool                               copyShm(const Time::steady_tp& now);
+-    void                               share();
+-    bool                               shouldOverlayCursor() const;
++    void shareFrame(wl_resource* buffer, bool ignoreDamage);
+ 
+     friend class CToplevelExportProtocol;
++    friend class CToplevelExportClient;
+ };
+ 
+ class CToplevelExportProtocol : IWaylandProtocol {
+@@ -82,15 +73,9 @@ class CToplevelExportProtocol : IWaylandProtocol {
+   private:
+     std::vector<SP<CToplevelExportClient>> m_clients;
+     std::vector<SP<CToplevelExportFrame>>  m_frames;
+-    std::vector<WP<CToplevelExportFrame>>  m_framesAwaitingWrite;
+ 
+     void                                   onWindowUnmap(PHLWINDOW pWindow);
+ 
+-    void                                   shareFrame(CToplevelExportFrame* frame);
+-    bool                                   copyFrameDmabuf(CToplevelExportFrame* frame, const Time::steady_tp& now);
+-    bool                                   copyFrameShm(CToplevelExportFrame* frame, const Time::steady_tp& now);
+-    void                                   sendDamage(CToplevelExportFrame* frame);
+-
+     friend class CToplevelExportClient;
+     friend class CToplevelExportFrame;
+ };
+diff --git a/src/protocols/core/Seat.cpp b/src/protocols/core/Seat.cpp
+index bfe70a75057..52015fd8513 100644
+--- a/src/protocols/core/Seat.cpp
++++ b/src/protocols/core/Seat.cpp
+@@ -141,6 +141,10 @@ CWLPointerResource::CWLPointerResource(SP<CWlPointer> resource_, SP<CWLSeatResou
+         sendEnter(g_pSeatManager->m_state.pointerFocus.lock(), {-1, -1} /* Coords don't really matter that much, they will be updated next move */);
+ }
+ 
++CWLPointerResource::~CWLPointerResource() {
++    m_events.destroyed.emit();
++}
++
+ int CWLPointerResource::version() {
+     return m_resource->version();
+ }
+diff --git a/src/protocols/core/Seat.hpp b/src/protocols/core/Seat.hpp
+index c30bbd718c6..85dc5c39fc6 100644
+--- a/src/protocols/core/Seat.hpp
++++ b/src/protocols/core/Seat.hpp
+@@ -71,6 +71,7 @@ class CWLTouchResource {
+ class CWLPointerResource {
+   public:
+     CWLPointerResource(SP<CWlPointer> resource_, SP<CWLSeatResource> owner_);
++    ~CWLPointerResource();
+ 
+     bool                good();
+     int                 version();
+@@ -88,6 +89,10 @@ class CWLPointerResource {
+ 
+     WP<CWLSeatResource> m_owner;
+ 
++    struct {
++        CSignalT<> destroyed;
++    } m_events;
++
+     //
+     static SP<CWLPointerResource> fromResource(wl_resource* res);
+ 
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index 3e0c4f26651..351df0c34d2 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -685,6 +685,7 @@ void CHyprOpenGLImpl::beginSimple(PHLMONITOR pMonitor, const CRegion& damage, SP
+     if (!m_shadersInitialized)
+         initShaders();
+ 
++    m_renderData.transformDamage = true;
+     m_renderData.damage.set(damage);
+     m_renderData.finalDamage.set(damage);
+ 
+@@ -752,6 +753,7 @@ void CHyprOpenGLImpl::begin(PHLMONITOR pMonitor, const CRegion& damage_, CFrameb
+     if (m_renderData.pCurrentMonData->monitorMirrorFB.isAllocated() && m_renderData.pMonitor->m_mirrors.empty())
+         m_renderData.pCurrentMonData->monitorMirrorFB.release();
+ 
++    m_renderData.transformDamage = true;
+     m_renderData.damage.set(damage_);
+     m_renderData.finalDamage.set(finalDamage.value_or(damage_));
+ 
+@@ -1059,7 +1061,7 @@ void CHyprOpenGLImpl::clear(const CHyprColor& color) {
+ 
+     if (!m_renderData.damage.empty()) {
+         m_renderData.damage.forEachRect([this](const auto& RECT) {
+-            scissor(&RECT);
++            scissor(&RECT, m_renderData.transformDamage);
+             glClear(GL_COLOR_BUFFER_BIT);
+         });
+     }
+@@ -1194,13 +1196,13 @@ void CHyprOpenGLImpl::renderRectWithDamageInternal(const CBox& box, const CHyprC
+ 
+         if (!damageClip.empty()) {
+             damageClip.forEachRect([this](const auto& RECT) {
+-                scissor(&RECT);
++                scissor(&RECT, m_renderData.transformDamage);
+                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+             });
+         }
+     } else {
+         data.damage->forEachRect([this](const auto& RECT) {
+-            scissor(&RECT);
++            scissor(&RECT, m_renderData.transformDamage);
+             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+         });
+     }
+@@ -1588,13 +1590,13 @@ void CHyprOpenGLImpl::renderTextureInternal(SP<CTexture> tex, const CBox& box, c
+ 
+         if (!damageClip.empty()) {
+             damageClip.forEachRect([this](const auto& RECT) {
+-                scissor(&RECT);
++                scissor(&RECT, m_renderData.transformDamage);
+                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+             });
+         }
+     } else {
+         data.damage->forEachRect([this](const auto& RECT) {
+-            scissor(&RECT);
++            scissor(&RECT, m_renderData.transformDamage);
+             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+         });
+     }
+@@ -1640,7 +1642,7 @@ void CHyprOpenGLImpl::renderTexturePrimitive(SP<CTexture> tex, const CBox& box)
+     glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
+ 
+     m_renderData.damage.forEachRect([this](const auto& RECT) {
+-        scissor(&RECT);
++        scissor(&RECT, m_renderData.transformDamage);
+         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+     });
+ 
+@@ -1681,7 +1683,7 @@ void CHyprOpenGLImpl::renderTextureMatte(SP<CTexture> tex, const CBox& box, CFra
+     glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
+ 
+     m_renderData.damage.forEachRect([this](const auto& RECT) {
+-        scissor(&RECT);
++        scissor(&RECT, m_renderData.transformDamage);
+         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+     });
+ 
+@@ -2275,7 +2277,7 @@ void CHyprOpenGLImpl::renderBorder(const CBox& box, const CGradientValueData& gr
+ 
+     if (!borderRegion.empty()) {
+         borderRegion.forEachRect([this](const auto& RECT) {
+-            scissor(&RECT);
++            scissor(&RECT, m_renderData.transformDamage);
+             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+         });
+     }
+@@ -2364,7 +2366,7 @@ void CHyprOpenGLImpl::renderBorder(const CBox& box, const CGradientValueData& gr
+ 
+     if (!borderRegion.empty()) {
+         borderRegion.forEachRect([this](const auto& RECT) {
+-            scissor(&RECT);
++            scissor(&RECT, m_renderData.transformDamage);
+             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+         });
+     }
+@@ -2427,13 +2429,13 @@ void CHyprOpenGLImpl::renderRoundedShadow(const CBox& box, int round, float roun
+ 
+         if (!damageClip.empty()) {
+             damageClip.forEachRect([this](const auto& RECT) {
+-                scissor(&RECT);
++                scissor(&RECT, m_renderData.transformDamage);
+                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+             });
+         }
+     } else {
+         m_renderData.damage.forEachRect([this](const auto& RECT) {
+-            scissor(&RECT);
++            scissor(&RECT, m_renderData.transformDamage);
+             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+         });
+     }
+@@ -3063,18 +3065,30 @@ void CHyprOpenGLImpl::setCapStatus(int cap, bool status) {
+     }
+ }
+ 
+-uint32_t CHyprOpenGLImpl::getPreferredReadFormat(PHLMONITOR pMonitor) {
++DRMFormat CHyprOpenGLImpl::getPreferredReadFormat(PHLMONITOR pMonitor) {
+     static const auto PFORCE8BIT = CConfigValue<Hyprlang::INT>("misc:screencopy_force_8b");
+ 
+-    if (!*PFORCE8BIT)
+-        return pMonitor->m_output->state->state().drmFormat;
++    auto              monFmt = pMonitor->m_output->state->state().drmFormat;
+ 
+-    auto fmt = pMonitor->m_output->state->state().drmFormat;
++    if (*PFORCE8BIT)
++        if (monFmt == DRM_FORMAT_BGRA1010102 || monFmt == DRM_FORMAT_ARGB2101010 || monFmt == DRM_FORMAT_XRGB2101010 || monFmt == DRM_FORMAT_BGRX1010102 ||
++            monFmt == DRM_FORMAT_XBGR2101010)
++            monFmt = DRM_FORMAT_XRGB8888;
+ 
+-    if (fmt == DRM_FORMAT_BGRA1010102 || fmt == DRM_FORMAT_ARGB2101010 || fmt == DRM_FORMAT_XRGB2101010 || fmt == DRM_FORMAT_BGRX1010102 || fmt == DRM_FORMAT_XBGR2101010)
+-        return DRM_FORMAT_XRGB8888;
++    return monFmt;
++}
++
++std::vector<uint64_t> CHyprOpenGLImpl::getDRMFormatModifiers(DRMFormat drmFormat) {
++    SDRMFormat format;
++
++    for (const auto& fmt : m_drmFormats) {
++        if (fmt.drmFormat == drmFormat) {
++            format = fmt;
++            break;
++        }
++    }
+ 
+-    return fmt;
++    return format.modifiers;
+ }
+ 
+ bool CHyprOpenGLImpl::explicitSyncSupported() {
+diff --git a/src/render/OpenGL.hpp b/src/render/OpenGL.hpp
+index 3df8322b07d..bc1f5f4d265 100644
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -172,6 +172,8 @@ struct SCurrentRenderData {
+     bool                   useNearestNeighbor = false;
+     bool                   blockScreenShader  = false;
+     bool                   simplePass         = false;
++    bool                   transformDamage    = true;
++    bool                   noSimplify         = false;
+ 
+     Vector2D               primarySurfaceUVTopLeft     = Vector2D(-1, -1);
+     Vector2D               primarySurfaceUVBottomRight = Vector2D(-1, -1);
+@@ -305,8 +307,9 @@ class CHyprOpenGLImpl {
+ 
+     void         setDamage(const CRegion& damage, std::optional<CRegion> finalDamage = {});
+ 
+-    uint32_t     getPreferredReadFormat(PHLMONITOR pMonitor);
++    DRMFormat    getPreferredReadFormat(PHLMONITOR pMonitor);
+     std::vector<SDRMFormat>                           getDRMFormats();
++    std::vector<uint64_t>                             getDRMFormatModifiers(DRMFormat format);
+     EGLImageKHR                                       createEGLImage(const Aquamarine::SDMABUFAttrs& attrs);
+ 
+     bool                                              initShaders();
+diff --git a/src/render/Renderer.hpp b/src/render/Renderer.hpp
+index f2377b3bf63..24e0fb66137 100644
+--- a/src/render/Renderer.hpp
++++ b/src/render/Renderer.hpp
+@@ -16,6 +16,12 @@ class CWorkspace;
+ class CInputPopup;
+ class IHLBuffer;
+ class CEventLoopTimer;
++class CToplevelExportProtocolManager;
++class CInputManager;
++struct SSessionLockSurface;
++namespace Screenshare {
++    class CScreenshareFrame;
++};
+ 
+ enum eDamageTrackingModes : int8_t {
+     DAMAGE_TRACKING_INVALID = -1,
+@@ -37,10 +43,6 @@ enum eRenderMode : uint8_t {
+     RENDER_MODE_TO_BUFFER_READ_ONLY = 3,
+ };
+ 
+-class CToplevelExportProtocolManager;
+-class CInputManager;
+-struct SSessionLockSurface;
+-
+ struct SRenderWorkspaceUntilData {
+     PHLLS     ls;
+     PHLWINDOW w;
+@@ -166,6 +168,7 @@ class CHyprRenderer {
+ 
+     friend class CHyprOpenGLImpl;
+     friend class CToplevelExportFrame;
++    friend class Screenshare::CScreenshareFrame;
+     friend class CInputManager;
+     friend class CPointerManager;
+     friend class CMonitor;
+diff --git a/src/render/pass/Pass.cpp b/src/render/pass/Pass.cpp
+index b62a4734e5c..3c82c84c244 100644
+--- a/src/render/pass/Pass.cpp
++++ b/src/render/pass/Pass.cpp
+@@ -171,7 +171,7 @@ CRegion CRenderPass::render(const CRegion& damage_) {
+     } else
+         g_pHyprOpenGL->m_renderData.finalDamage = m_damage;
+ 
+-    if (std::ranges::any_of(m_passElements, [](const auto& el) { return el->element->disableSimplification(); })) {
++    if (g_pHyprOpenGL->m_renderData.noSimplify || std::ranges::any_of(m_passElements, [](const auto& el) { return el->element->disableSimplification(); })) {
+         for (auto& el : m_passElements) {
+             el->elementDamage = m_damage;
+         }
+diff --git a/src/render/pass/SurfacePassElement.cpp b/src/render/pass/SurfacePassElement.cpp
+index df410014d0d..c5feb8f7615 100644
+--- a/src/render/pass/SurfacePassElement.cpp
++++ b/src/render/pass/SurfacePassElement.cpp
+@@ -104,7 +104,7 @@ void CSurfacePassElement::draw(const CRegion& damage) {
+     }
+ 
+     const bool WINDOWOPAQUE    = m_data.pWindow && m_data.pWindow->wlSurface()->resource() == m_data.surface ? m_data.pWindow->opaque() : false;
+-    const bool CANDISABLEBLEND = ALPHA >= 1.f && OVERALL_ALPHA >= 1.f && rounding == 0 && WINDOWOPAQUE;
++    const bool CANDISABLEBLEND = ALPHA >= 1.f && OVERALL_ALPHA >= 1.f && rounding <= 0 && WINDOWOPAQUE;
+ 
+     if (CANDISABLEBLEND)
+         g_pHyprOpenGL->blend(false);

@@ -1,0 +1,100 @@
+diff --git a/src/protocols/core/Compositor.cpp b/src/protocols/core/Compositor.cpp
+index ed36b1f98f0..541eae92865 100644
+--- a/src/protocols/core/Compositor.cpp
++++ b/src/protocols/core/Compositor.cpp
+@@ -550,13 +550,6 @@ void CWLSurfaceResource::commitState(SSurfaceState& state) {
+             nullptr);
+     }
+ 
+-    if (m_current.updated.bits.damage) {
+-        // damage is always relative to the current commit
+-        m_current.updated.bits.damage = false;
+-        m_current.damage.clear();
+-        m_current.bufferDamage.clear();
+-    }
+-
+     // release the buffer if it's synchronous (SHM) as updateSynchronousTexture() has copied the buffer data to a GPU tex
+     // if it doesn't have a role, we can't release it yet, in case it gets turned into a cursor.
+     if (m_current.buffer && m_current.buffer->isSynchronous() && m_role->role() != SURFACE_ROLE_UNASSIGNED)
+diff --git a/src/protocols/types/SurfaceState.cpp b/src/protocols/types/SurfaceState.cpp
+index 17437fbc4f6..96e8e769a57 100644
+--- a/src/protocols/types/SurfaceState.cpp
++++ b/src/protocols/types/SurfaceState.cpp
+@@ -65,11 +65,8 @@ void SSurfaceState::reset() {
+     lockMask = LOCK_REASON_NONE;
+ }
+ 
+-void SSurfaceState::updateFrom(SSurfaceState& ref, bool merge) {
+-    if (merge)
+-        updated.all |= ref.updated.all;
+-    else
+-        updated = ref.updated;
++void SSurfaceState::updateFrom(SSurfaceState& ref) {
++    updated = ref.updated;
+ 
+     if (ref.updated.bits.buffer) {
+         buffer     = ref.buffer;
+@@ -81,6 +78,10 @@ void SSurfaceState::updateFrom(SSurfaceState& ref, bool merge) {
+     if (ref.updated.bits.damage) {
+         damage       = ref.damage;
+         bufferDamage = ref.bufferDamage;
++    } else {
++        // damage is always relative to the current commit
++        damage.clear();
++        bufferDamage.clear();
+     }
+ 
+     if (ref.updated.bits.input)
+diff --git a/src/protocols/types/SurfaceState.hpp b/src/protocols/types/SurfaceState.hpp
+index d41b3d3bc91..dd767962265 100644
+--- a/src/protocols/types/SurfaceState.hpp
++++ b/src/protocols/types/SurfaceState.hpp
+@@ -89,7 +89,7 @@ struct SSurfaceState {
+     void         updateSynchronousTexture(SP<CTexture> lastTexture);
+ 
+     // helpers
+-    CRegion accumulateBufferDamage();                           // transforms state.damage and merges it into state.bufferDamage
+-    void    updateFrom(SSurfaceState& ref, bool merge = false); // updates this state based on a reference state.
+-    void    reset();                                            // resets pending state after commit
++    CRegion accumulateBufferDamage();       // transforms state.damage and merges it into state.bufferDamage
++    void    updateFrom(SSurfaceState& ref); // updates this state based on a reference state.
++    void    reset();                        // resets pending state after commit
+ };
+diff --git a/src/protocols/types/SurfaceStateQueue.cpp b/src/protocols/types/SurfaceStateQueue.cpp
+index 3408d61c206..c10b556fb87 100644
+--- a/src/protocols/types/SurfaceStateQueue.cpp
++++ b/src/protocols/types/SurfaceStateQueue.cpp
+@@ -63,28 +63,12 @@ auto CSurfaceStateQueue::find(const WP<SSurfaceState>& state) -> std::deque<UP<S
+ }
+ 
+ void CSurfaceStateQueue::tryProcess() {
+-    if (m_queue.empty())
+-        return;
+-
+-    auto front = m_queue.begin();
+-    if (front->get()->lockMask != LOCK_REASON_NONE)
+-        return;
++    while (!m_queue.empty()) {
++        auto& front = m_queue.front();
++        if (front->lockMask != LOCK_REASON_NONE)
++            return;
+ 
+-    auto next = std::next(front);
+-    if (next == m_queue.end()) {
+-        m_surface->commitState(**front);
++        m_surface->commitState(*front);
+         m_queue.pop_front();
+-        return;
+     }
+-
+-    while (!m_queue.empty() && next != m_queue.end() && next->get()->lockMask == LOCK_REASON_NONE && !next->get()->updated.bits.buffer) {
+-        next->get()->updateFrom(**front, true);
+-        m_queue.pop_front();
+-
+-        front = m_queue.begin();
+-        next  = std::next(front);
+-    }
+-
+-    m_surface->commitState(**front);
+-    m_queue.pop_front();
+ }

@@ -1,0 +1,274 @@
+diff --git a/src/config/ConfigDescriptions.hpp b/src/config/ConfigDescriptions.hpp
+index aaaa070420d..7ae948bb3bb 100644
+--- a/src/config/ConfigDescriptions.hpp
++++ b/src/config/ConfigDescriptions.hpp
+@@ -1846,7 +1846,7 @@ inline static const std::vector<SConfigOptionDescription> CONFIG_OPTIONS = {
+         .value       = "debug:fifo_pending_workaround",
+         .description = "Fifo workaround for empty pending list",
+         .type        = CONFIG_OPTION_BOOL,
+-        .data        = SConfigOptionDescription::SBoolData{true},
++        .data        = SConfigOptionDescription::SBoolData{false},
+     },
+     SConfigOptionDescription{
+         .value       = "debug:render_solitary_wo_damage",
+diff --git a/src/config/ConfigManager.cpp b/src/config/ConfigManager.cpp
+index 0890cc4e183..0374e86e7d7 100644
+--- a/src/config/ConfigManager.cpp
++++ b/src/config/ConfigManager.cpp
+@@ -573,7 +573,7 @@ CConfigManager::CConfigManager() {
+     registerConfigVar("debug:full_cm_proto", Hyprlang::INT{0});
+     registerConfigVar("debug:ds_handle_same_buffer", Hyprlang::INT{1});
+     registerConfigVar("debug:ds_handle_same_buffer_fifo", Hyprlang::INT{1});
+-    registerConfigVar("debug:fifo_pending_workaround", Hyprlang::INT{1});
++    registerConfigVar("debug:fifo_pending_workaround", Hyprlang::INT{0});
+     registerConfigVar("debug:render_solitary_wo_damage", Hyprlang::INT{0});
+ 
+     registerConfigVar("decoration:rounding", Hyprlang::INT{0});
+diff --git a/src/protocols/Fifo.cpp b/src/protocols/Fifo.cpp
+index 386327b538c..8f842593155 100644
+--- a/src/protocols/Fifo.cpp
++++ b/src/protocols/Fifo.cpp
+@@ -18,7 +18,8 @@ CFifoResource::CFifoResource(UP<CWpFifoV1>&& resource_, SP<CWLSurfaceResource> s
+             return;
+         }
+ 
+-        m_pending.barrierSet = true;
++        m_surface->m_pending.barrierSet        = true;
++        m_surface->m_pending.updated.bits.fifo = true;
+     });
+ 
+     m_resource->setWaitBarrier([this](CWpFifoV1* r) {
+@@ -27,54 +28,37 @@ CFifoResource::CFifoResource(UP<CWpFifoV1>&& resource_, SP<CWLSurfaceResource> s
+             return;
+         }
+ 
+-        if (!m_pending.barrierSet)
++        if (!m_surface->m_current.barrierSet) {
++            // that might mean an empty commit with a barrier_set alone
++            static const auto PPEND = CConfigValue<Hyprlang::INT>("debug:fifo_pending_workaround");
++            if (!m_surface->m_pending.fifoScheduled)
++                m_surface->m_pending.fifoScheduled = checkMonitors(*PPEND);
++
+             return;
++        }
+ 
+-        m_pending.surfaceLocked = true;
++        m_surface->m_pending.surfaceLocked = true;
+     });
+ 
+     m_listeners.surfaceStateCommit = m_surface->m_events.stateCommit.listen([this](auto state) {
++        if (!state || !state->surfaceLocked)
++            return;
++
+         static const auto PPEND = CConfigValue<Hyprlang::INT>("debug:fifo_pending_workaround");
+ 
+-        if (!m_pending.surfaceLocked)
+-            return;
++        //#TODO:
++        // this feels wrong, but if we have no pending frames, presented might never come because
++        // we are waiting on the barrier to unlock and no damage is around.
++        // unlock on timeout instead?
++        if (!state->fifoScheduled)
++            state->fifoScheduled = checkMonitors(*PPEND);
+ 
+-        if (*PPEND) {
+-            //#TODO:
+-            // this feels wrong, but if we have no pending frames, presented might never come because
+-            // we are waiting on the barrier to unlock and no damage is around.
+-            // unlock on timeout instead?
+-            if (m_surface->m_enteredOutputs.empty() && m_surface->m_hlSurface) {
+-                for (auto& m : g_pCompositor->m_monitors) {
+-                    if (!m || !m->m_enabled)
+-                        continue;
+-
+-                    auto box = m_surface->m_hlSurface->getSurfaceBoxGlobal();
+-                    if (box && !box->intersection({m->m_position, m->m_size}).empty()) {
+-                        if (m->m_tearingState.activelyTearing)
+-                            return; // dont fifo lock on tearing.
+-
+-                        g_pCompositor->scheduleFrameForMonitor(m, Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
+-                    }
+-                }
+-            } else {
+-                for (auto& m : m_surface->m_enteredOutputs) {
+-                    if (!m)
+-                        continue;
+-
+-                    if (m->m_tearingState.activelyTearing)
+-                        return; // dont fifo lock on tearing.
+-
+-                    g_pCompositor->scheduleFrameForMonitor(m.lock(), Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
+-                }
+-            }
+-        }
++        if (!state->fifoScheduled)
++            return;
+ 
+         // only lock once its mapped.
+         if (m_surface->m_mapped)
+             m_surface->m_stateQueue.lock(state, LOCK_REASON_FIFO);
+-
+-        m_pending = {};
+     });
+ }
+ 
+@@ -87,9 +71,41 @@ bool CFifoResource::good() {
+ }
+ 
+ void CFifoResource::presented() {
++    m_surface->m_current.barrierSet = false;
+     m_surface->m_stateQueue.unlockFirst(LOCK_REASON_FIFO);
+ }
+ 
++bool CFifoResource::checkMonitors(bool needsSchedule) {
++    if (m_surface->m_enteredOutputs.empty() && m_surface->m_hlSurface) {
++        for (auto& m : g_pCompositor->m_monitors) {
++            if (!m || !m->m_enabled)
++                continue;
++
++            auto box = m_surface->m_hlSurface->getSurfaceBoxGlobal();
++            if (box && !box->intersection({m->m_position, m->m_size}).empty()) {
++                if (m->m_tearingState.activelyTearing)
++                    return false; // dont fifo lock on tearing.
++
++                if (needsSchedule)
++                    g_pCompositor->scheduleFrameForMonitor(m, Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
++            }
++        }
++    } else {
++        for (auto& m : m_surface->m_enteredOutputs) {
++            if (!m)
++                continue;
++
++            if (m->m_tearingState.activelyTearing)
++                return false; // dont fifo lock on tearing.
++
++            if (needsSchedule)
++                g_pCompositor->scheduleFrameForMonitor(m.lock(), Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
++        }
++    }
++
++    return true;
++}
++
+ CFifoManagerResource::CFifoManagerResource(UP<CWpFifoManagerV1>&& resource_) : m_resource(std::move(resource_)) {
+     if UNLIKELY (!m_resource->resource())
+         return;
+diff --git a/src/protocols/Fifo.hpp b/src/protocols/Fifo.hpp
+index 8551e78cd67..5b143f79258 100644
+--- a/src/protocols/Fifo.hpp
++++ b/src/protocols/Fifo.hpp
+@@ -21,18 +21,12 @@ class CFifoResource {
+ 
+     WP<CWLSurfaceResource> m_surface;
+ 
+-    struct SState {
+-        bool barrierSet    = false;
+-        bool surfaceLocked = false;
+-    };
+-
+-    SState m_pending;
+-
+     struct {
+         CHyprSignalListener surfaceStateCommit;
+     } m_listeners;
+ 
+     void presented();
++    bool checkMonitors(bool needsSchedule = false);
+ 
+     friend class CFifoProtocol;
+     friend class CFifoManagerResource;
+diff --git a/src/protocols/WaylandProtocol.hpp b/src/protocols/WaylandProtocol.hpp
+index 5f1c9798215..5c187c7d36e 100644
+--- a/src/protocols/WaylandProtocol.hpp
++++ b/src/protocols/WaylandProtocol.hpp
+@@ -34,7 +34,7 @@
+         } else if (level == Log::DEBUG || level == Log::INFO || level == Log::TRACE) {                                                                                             \
+             oss << "[" << EXTRACT_CLASS_NAME() << "] ";                                                                                                                            \
+         }                                                                                                                                                                          \
+-        if constexpr (std::tuple_size<decltype(std::make_tuple(__VA_ARGS__))>::value == 1 && std::is_same_v<decltype(__VA_ARGS__), std::string>) {                                 \
++        if constexpr (std::tuple_size_v<decltype(std::make_tuple(__VA_ARGS__))> == 1 && std::is_same_v<decltype(__VA_ARGS__), std::string>) {                                      \
+             oss << __VA_ARGS__;                                                                                                                                                    \
+             Log::logger->log(level, oss.str());                                                                                                                                    \
+         } else {                                                                                                                                                                   \
+diff --git a/src/protocols/core/Compositor.cpp b/src/protocols/core/Compositor.cpp
+index 9fc447035d9..2fd586a831f 100644
+--- a/src/protocols/core/Compositor.cpp
++++ b/src/protocols/core/Compositor.cpp
+@@ -517,6 +517,15 @@ void CWLSurfaceResource::scheduleState(WP<SSurfaceState> state) {
+ }
+ 
+ void CWLSurfaceResource::commitState(SSurfaceState& state) {
++    // TODO might be incorrect. needed for VRR with FIFO to avoid same buffer extra frames for second commit when it's used in this way:
++    // wp_fifo_v1#43.set_barrier()
++    // wp_fifo_v1#43.wait_barrier()
++    // wl_surface#3.commit()
++    // wp_fifo_v1#43.wait_barrier()
++    // wl_surface#3.commit()
++    if (!state.updated.all && m_mapped && state.fifoScheduled)
++        return;
++
+     auto lastTexture = m_current.texture;
+     m_current.updateFrom(state);
+ 
+diff --git a/src/protocols/types/SurfaceState.cpp b/src/protocols/types/SurfaceState.cpp
+index ecead0086ea..a85a3c441e2 100644
+--- a/src/protocols/types/SurfaceState.cpp
++++ b/src/protocols/types/SurfaceState.cpp
+@@ -63,6 +63,10 @@ void SSurfaceState::reset() {
+ 
+     callbacks.clear();
+     lockMask = LOCK_REASON_NONE;
++
++    barrierSet    = false;
++    surfaceLocked = false;
++    fifoScheduled = false;
+ }
+ 
+ void SSurfaceState::updateFrom(SSurfaceState& ref) {
+@@ -112,4 +116,7 @@ void SSurfaceState::updateFrom(SSurfaceState& ref) {
+         callbacks.insert(callbacks.end(), std::make_move_iterator(ref.callbacks.begin()), std::make_move_iterator(ref.callbacks.end()));
+         ref.callbacks.clear();
+     }
++
++    if (ref.barrierSet)
++        barrierSet = ref.barrierSet;
+ }
+diff --git a/src/protocols/types/SurfaceState.hpp b/src/protocols/types/SurfaceState.hpp
+index dd767962265..315fa4fc476 100644
+--- a/src/protocols/types/SurfaceState.hpp
++++ b/src/protocols/types/SurfaceState.hpp
+@@ -48,6 +48,7 @@ struct SSurfaceState {
+             bool acquire : 1;
+             bool acked : 1;
+             bool frame : 1;
++            bool fifo : 1;
+         } bits;
+     } updated;
+ 
+@@ -88,6 +89,11 @@ struct SSurfaceState {
+     SP<CTexture> texture;
+     void         updateSynchronousTexture(SP<CTexture> lastTexture);
+ 
++    // fifo
++    bool barrierSet    = false;
++    bool surfaceLocked = false;
++    bool fifoScheduled = false;
++
+     // helpers
+     CRegion accumulateBufferDamage();       // transforms state.damage and merges it into state.bufferDamage
+     void    updateFrom(SSurfaceState& ref); // updates this state based on a reference state.
+diff --git a/src/protocols/types/SurfaceStateQueue.cpp b/src/protocols/types/SurfaceStateQueue.cpp
+index 348ac711869..82a04878a85 100644
+--- a/src/protocols/types/SurfaceStateQueue.cpp
++++ b/src/protocols/types/SurfaceStateQueue.cpp
+@@ -68,6 +68,9 @@ auto CSurfaceStateQueue::find(const WP<SSurfaceState>& state) -> std::deque<UP<S
+ void CSurfaceStateQueue::tryProcess() {
+     while (!m_queue.empty()) {
+         auto& front = m_queue.front();
++        if (front->lockMask & LOCK_REASON_FIFO && !m_surface->m_current.barrierSet)
++            front->lockMask &= ~LOCK_REASON_FIFO;
++
+         if (front->lockMask != LOCK_REASON_NONE)
+             return;
+ 

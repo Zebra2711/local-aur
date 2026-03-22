@@ -1,0 +1,42 @@
+diff --git a/src/layout/LayoutManager.cpp b/src/layout/LayoutManager.cpp
+index 3f28085f22b..d5103fb5c3f 100644
+--- a/src/layout/LayoutManager.cpp
++++ b/src/layout/LayoutManager.cpp
+@@ -125,6 +125,9 @@ void CLayoutManager::moveInDirection(SP<ITarget> target, const std::string& dire
+         return;
+     }
+ 
++    if (!target->space())
++        return;
++
+     target->space()->moveTargetInDirection(target, dir, silent);
+ }
+ 
+diff --git a/src/layout/algorithm/ModeAlgorithm.cpp b/src/layout/algorithm/ModeAlgorithm.cpp
+index dea5bb17d5f..2fea2b68197 100644
+--- a/src/layout/algorithm/ModeAlgorithm.cpp
++++ b/src/layout/algorithm/ModeAlgorithm.cpp
+@@ -18,8 +18,21 @@ std::optional<Vector2D> IModeAlgorithm::predictSizeForNewTarget() {
+ std::optional<Vector2D> IModeAlgorithm::focalPointForDir(SP<ITarget> t, Math::eDirection dir) {
+     Vector2D   focalPoint;
+ 
+-    const auto WINDOWIDEALBB =
+-        t->fullscreenMode() != FSMODE_NONE ? m_parent->space()->workspace()->m_monitor->logicalBox() : t->window()->getWindowIdealBoundingBoxIgnoreReserved();
++    const auto getFullscreenBB = [&]() -> std::optional<CBox> {
++        const auto PARENT = m_parent.lock();
++        if (!PARENT)
++            return std::nullopt;
++        const auto SPACE = PARENT->space();
++        if (!SPACE)
++            return std::nullopt;
++        const auto WS = SPACE->workspace();
++        if (!WS || !WS->m_monitor)
++            return std::nullopt;
++        return WS->m_monitor->logicalBox();
++    };
++
++    const auto WINDOWIDEALBB = t->fullscreenMode() != FSMODE_NONE ? getFullscreenBB().value_or(t->window()->getWindowIdealBoundingBoxIgnoreReserved()) :
++                                                                    t->window()->getWindowIdealBoundingBoxIgnoreReserved();
+ 
+     switch (dir) {
+         case Math::DIRECTION_UP: focalPoint = WINDOWIDEALBB.pos() + Vector2D{WINDOWIDEALBB.size().x / 2.0, -1.0}; break;

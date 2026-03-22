@@ -1,0 +1,139 @@
+From ac9c0433f93fabed857fe809de108af9cee787bc Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 4 Feb 2026 19:07:37 +0100
+Subject: [PATCH] atomic: use sequence_handler and drmEventcontext version 4
+
+use CRTC Sequence handler if we can, poll the current sequence
+drmCrtcGetSequence and if it succeeds, try queue the next one if we can
+or fallback to the old pageflip handler.
+
+by using crtc sequences we are allowed a much higher resolution
+timestamp and get much more correct timestamps for our presentation
+events that is not rounded away.
+
+will reduce jitters and drifting in timestamps and get us lower latencies.
+---
+ include/aquamarine/backend/DRM.hpp |  3 ++
+ src/backend/drm/DRM.cpp            | 46 +++++++++++++++++++++---------
+ src/backend/drm/impl/Atomic.cpp    | 12 ++++++++
+ 3 files changed, 48 insertions(+), 13 deletions(-)
+
+diff --git a/include/aquamarine/backend/DRM.hpp b/include/aquamarine/backend/DRM.hpp
+index cc39686..36421c5 100644
+--- a/include/aquamarine/backend/DRM.hpp
++++ b/include/aquamarine/backend/DRM.hpp
+@@ -233,6 +233,9 @@ namespace Aquamarine {
+     };
+ 
+     struct SDRMPageFlip {
++        uint64_t                                       queued_sequence  = 0;
++        timespec                                       present_time     = {};
++        unsigned                                       present_sequence = 0;
+         Hyprutils::Memory::CWeakPointer<SDRMConnector> connector;
+     };
+ 
+diff --git a/src/backend/drm/DRM.cpp b/src/backend/drm/DRM.cpp
+index 147aca3..7ff7887 100644
+--- a/src/backend/drm/DRM.cpp
++++ b/src/backend/drm/DRM.cpp
+@@ -921,20 +921,17 @@ int Aquamarine::CDRMBackend::drmRenderNodeFD() {
+     return gpu->renderNodeFd;
+ }
+ 
+-static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, unsigned crtc_id, void* data) {
+-    auto pageFlip = (SDRMPageFlip*)data;
+-
+-    if (!pageFlip || !pageFlip->connector)
+-        return;
+-
++static void present(SDRMPageFlip* pageFlip) {
+     pageFlip->connector->isPageFlipPending = false;
+ 
+     const auto& BACKEND = pageFlip->connector->backend;
+ 
+-    TRACE(BACKEND->log(AQ_LOG_TRACE, std::format("drm: pf event seq {} sec {} usec {} crtc {}", seq, tv_sec, tv_usec, crtc_id)));
++    TRACE(BACKEND->log(AQ_LOG_TRACE,
++                       std::format("drm: present event seq {} sec {} usec {} crtc {}", pageFlip->present_sequence, pageFlip->present_time.tv_sec, pageFlip->present_time.tv_nsec,
++                                   pageFlip->connector->crtc->id)));
+ 
+     if (pageFlip->connector->status != DRM_MODE_CONNECTED || !pageFlip->connector->crtc) {
+-        BACKEND->log(AQ_LOG_DEBUG, "drm: Ignoring a pf event from a disabled crtc / connector");
++        BACKEND->log(AQ_LOG_DEBUG, "drm: Ignoring a present event from a disabled crtc / connector");
+         return;
+     }
+ 
+@@ -942,12 +939,10 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
+ 
+     uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION | IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
+ 
+-    timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
+-
+     pageFlip->connector->output->events.present.emit(IOutput::SPresentEvent{
+         .presented = BACKEND->sessionActive(),
+-        .when      = &presented,
+-        .seq       = seq,
++        .when      = &pageFlip->present_time,
++        .seq       = pageFlip->present_sequence,
+         .refresh   = (int)(pageFlip->connector->refresh ? (1000000000000LL / pageFlip->connector->refresh) : 0),
+         .flags     = flags,
+     });
+@@ -956,10 +951,35 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
+         pageFlip->connector->output->events.frame.emit();
+ }
+ 
++static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, unsigned crtc_id, void* data) {
++    auto pageFlip = rc<SDRMPageFlip*>(data);
++
++    if (!pageFlip || !pageFlip->connector || pageFlip->queued_sequence != 0)
++        return;
++
++    pageFlip->present_sequence = seq;
++    pageFlip->present_time     = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
++
++    present(pageFlip);
++}
++
++static void handleCRTCSequence(int fd, uint64_t seq, uint64_t ns, uint64_t data) {
++    auto* pageFlip = rc<SDRMPageFlip*>(data);
++
++    if (!pageFlip || !pageFlip->connector || pageFlip->queued_sequence != seq)
++        return;
++
++    pageFlip->present_sequence = seq;
++    pageFlip->present_time     = {.tv_sec = sc<time_t>(ns / 1'000'000'000), .tv_nsec = sc<long>(ns % 1'000'000'000)};
++
++    present(pageFlip);
++}
++
+ bool Aquamarine::CDRMBackend::dispatchEvents() {
+     drmEventContext event = {
+-        .version            = 3,
++        .version            = 4,
+         .page_flip_handler2 = ::handlePF,
++        .sequence_handler   = ::handleCRTCSequence,
+     };
+ 
+     if (drmHandleEvent(gpu->fd, &event) != 0)
+diff --git a/src/backend/drm/impl/Atomic.cpp b/src/backend/drm/impl/Atomic.cpp
+index 2eb0f7b..da46441 100644
+--- a/src/backend/drm/impl/Atomic.cpp
++++ b/src/backend/drm/impl/Atomic.cpp
+@@ -258,6 +258,18 @@ bool Aquamarine::CDRMAtomicRequest::commit(uint32_t flagssss) {
+         return false;
+     }
+ 
++    if (conn && flagssss & DRM_MODE_PAGE_FLIP_EVENT) {
++        uint64_t prevSeq, prevNs;
++        if (drmCrtcGetSequence(backend->gpu->fd, conn->crtc->id, &prevSeq, &prevNs) == 0) {
++            if (drmCrtcQueueSequence(backend->gpu->fd, conn->crtc->id, DRM_CRTC_SEQUENCE_RELATIVE, 1, &conn->pendingPageFlip.queued_sequence,
++                                     rc<uint64_t>(&conn->pendingPageFlip)) != 0) {
++                backend->log(AQ_LOG_TRACE, "atomic drm request: failed to queue crtc sequence");
++                conn->pendingPageFlip.queued_sequence = 0; // fallback to page_flip_handler2
++            }
++        } else
++            backend->log(AQ_LOG_TRACE, "atomic drm request: failed to get crtc sequence");
++    }
++
+     if (auto ret = drmModeAtomicCommit(backend->gpu->fd, req, flagssss, conn ? &conn->pendingPageFlip : nullptr); ret) {
+         backend->log((flagssss & DRM_MODE_ATOMIC_TEST_ONLY) ? AQ_LOG_DEBUG : AQ_LOG_ERROR,
+                      std::format("atomic drm request: failed to commit: {}, flags: {}", strerror(ret == -1 ? errno : -ret), flagsToStr(flagssss)));
