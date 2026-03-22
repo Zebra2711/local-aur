@@ -1,19 +1,20 @@
 pkgname=suwayomi-server
 _pkgname=Suwayomi-Server
+makedepends=('curl' 'jq' 'java-runtime>=8')
 # Get the latest release tag from GitHub API
-pkgver=$(curl -s "https://api.github.com/repos/Suwayomi/${_pkgname}-preview/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
+_pkgver=$(curl -s "https://api.github.com/repos/Suwayomi/${_pkgname}-preview/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
+pkgver=2.1.2087
 pkgrel=1
 pkgdesc="A free and open source manga reader that runs extensions built for Tachiyomi"
 arch=('any')
 url="https://github.com/Suwayomi/$_pkgname"
 license=('MPL2')
-makedepends=('curl' 'jq')
-depends=('java-runtime>=8' 'libc++')
-optdepends=('electron: for running in Electron')
+depends=('java-runtime>=21' 'libc++')
+optdepends=('electron37: for running in Electron')
 provides=("$pkgname" "$_pkgname")
 source=(
-  "$url-preview/releases/download/v$pkgver/$_pkgname-v$pkgver.jar"
-  "$url-preview/releases/download/v$pkgver/$_pkgname-v$pkgver-linux-assets.tar.gz"
+  "$url-preview/releases/download/v$_pkgver/$_pkgname-v$_pkgver.jar"
+  "$url-preview/releases/download/v$_pkgver/$_pkgname-v$_pkgver-linux-assets.tar.gz"
   "https://raw.githubusercontent.com/Suwayomi/Suwayomi-Server/refs/heads/master/scripts/resources/catch_abort.c"
 )
 noextract=("$_pkgname-v$pkgver.jar")
@@ -24,8 +25,15 @@ sha256sums=(
 )
 
 build() {
+  # Add missing abort handler
   export JAVA_HOME="/usr/lib/jvm/default"
+  sudo archlinux-java set java-8-openjdk
   gcc -fPIC -I$JAVA_HOME/include -I$JAVA_HOME/include/linux -shared catch_abort.c -lpthread -o catch_abort.so
+  sudo archlinux-java set java-21-openjdk
+}
+
+pkgver() {
+  echo $_pkgver
 }
 
 package() {

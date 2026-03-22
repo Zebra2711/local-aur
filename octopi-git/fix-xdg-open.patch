@@ -1,0 +1,102 @@
+diff --git a/src/wmhelper.cpp b/src/wmhelper.cpp
+index c163022e..0c4e6afb 100644
+--- a/src/wmhelper.cpp
++++ b/src/wmhelper.cpp
+@@ -26,6 +26,8 @@
+ #include <iostream>
+ 
+ #include <QApplication>
++#include <QDesktopServices>
++#include <QUrl>
+ #include <QProcess>
+ #include <QMessageBox>
+ 
+@@ -467,87 +469,5 @@ void WMHelper::openDirectory(const QString& dirName)
+     f = QFileInfo(dir);
+   }
+ 
+-  if (f.exists())
+-  {
+-    LinuxDistro distro = UnixCommand::getLinuxDistro();
+-
+-    if (distro == ectn_ARCHBANGLINUX && UnixCommand::hasTheExecutable(ctn_ARCHBANG_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_ARCHBANG_FILE_MANAGER, s );
+-    }
+-    else if (isGNOMERunning() && UnixCommand::hasTheExecutable(ctn_GNOME_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_GNOME_FILE_MANAGER, s );
+-    }
+-    else if (isCOSMICRunning() && UnixCommand::hasTheExecutable(ctn_COSMIC_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_COSMIC_FILE_MANAGER, s );
+-    }
+-    else if(isXFCERunning() && UnixCommand::hasTheExecutable(ctn_XFCE_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_XFCE_FILE_MANAGER, s );
+-    }
+-    else if (isKDERunning())
+-    {
+-      if (UnixCommand::hasTheExecutable(ctn_KDE4_FILE_MANAGER))
+-      {
+-        s << dir;
+-        p->startDetached( ctn_KDE4_FILE_MANAGER, s);
+-      }
+-      else if (UnixCommand::hasTheExecutable(ctn_KDE_FILE_MANAGER))
+-      {
+-        s << QStringLiteral("newTab");
+-        s << dir;
+-        p->startDetached( ctn_KDE_FILE_MANAGER, s );
+-      }
+-    }
+-    else if (isTDERunning())
+-    {
+-      if (UnixCommand::hasTheExecutable(ctn_TDE_FILE_MANAGER))
+-      {
+-        s << QStringLiteral("newTab");
+-        s << dir;
+-        p->startDetached( ctn_TDE_FILE_MANAGER, s );
+-      }
+-    }
+-    else if (isMATERunning() && UnixCommand::hasTheExecutable(ctn_MATE_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_MATE_FILE_MANAGER, s );
+-    }
+-    else if (isCinnamonRunning() && UnixCommand::hasTheExecutable(ctn_CINNAMON_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_CINNAMON_FILE_MANAGER, s );
+-    }
+-    else if (isLXQTRunning() && UnixCommand::hasTheExecutable(ctn_LXQT_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_LXQT_FILE_MANAGER, s );
+-    }
+-    else if (isLuminaRunning() && UnixCommand::hasTheExecutable(ctn_LUMINA_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_LUMINA_FILE_MANAGER, s );
+-    }
+-    else if (UnixCommand::hasTheExecutable(ctn_XFCE_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_XFCE_FILE_MANAGER, s );
+-    }
+-    else if (UnixCommand::hasTheExecutable(ctn_LXDE_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_LXDE_FILE_MANAGER, s );
+-    }
+-    else if (UnixCommand::hasTheExecutable(ctn_GNOME_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_GNOME_FILE_MANAGER, s );
+-    }
+-  }
++  QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+ }
