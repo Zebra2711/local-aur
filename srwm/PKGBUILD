@@ -8,8 +8,7 @@ url='https://github.com/infraflakes/srwm'
 makedepends=('make' 'git' 'go')
 optdepends=('iw'
             'xorg-xset'
-            'bc'
-            'sx')
+            'bc')
 depends=()
 conflicts=("srwm-bin")
 source=("git+$url.git"
