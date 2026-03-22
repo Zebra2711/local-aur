@@ -1,0 +1,131 @@
+diff --git a/src/searchbar.cpp b/src/searchbar.cpp
+index 94a782cc..1fc8c5c8 100644
+--- a/src/searchbar.cpp
++++ b/src/searchbar.cpp
+@@ -142,12 +142,22 @@ void SearchBar::paintEvent(QPaintEvent *)
+  */
+ void SearchBar::keyPressEvent(QKeyEvent *ke)
+ {
+-  if(!m_searchLineEdit->text().isEmpty() && (ke->key() == Qt::Key_Enter || ke->key() == Qt::Key_Return))
++  // If IME is composing text, do not intercept keys
++  if (QGuiApplication::inputMethod()->isVisible()) {
++    QWidget::keyPressEvent(ke);
++    return;
++  }
++
++  if (!m_searchLineEdit->text().isEmpty() &&
++      (ke->key() == Qt::Key_Enter || ke->key() == Qt::Key_Return))
+   {
+     findNext();
++    ke->accept();
++    return;
+   }
+-}
+ 
++  QWidget::keyPressEvent(ke);
++}
+ /*
+  * Whenever SearchBar needs to be brought to UI...
+  */
+diff --git a/src/wmhelper.cpp b/src/wmhelper.cpp
+index c163022e..0c4e6afb 100644
+--- a/src/wmhelper.cpp
++++ b/src/wmhelper.cpp
+@@ -26,6 +26,8 @@
+ #include <iostream>
+ 
+ #include <QApplication>
++#include <QDesktopServices>
++#include <QUrl>
+ #include <QProcess>
+ #include <QMessageBox>
+ 
+@@ -467,87 +469,5 @@ void WMHelper::openDirectory(const QString& dirName)
+     f = QFileInfo(dir);
+   }
+ 
+-  if (f.exists())
+-  {
+-    LinuxDistro distro = UnixCommand::getLinuxDistro();
+-
+-    if (distro == ectn_ARCHBANGLINUX && UnixCommand::hasTheExecutable(ctn_ARCHBANG_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_ARCHBANG_FILE_MANAGER, s );
+-    }
+-    else if (isGNOMERunning() && UnixCommand::hasTheExecutable(ctn_GNOME_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_GNOME_FILE_MANAGER, s );
+-    }
+-    else if (isCOSMICRunning() && UnixCommand::hasTheExecutable(ctn_COSMIC_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_COSMIC_FILE_MANAGER, s );
+-    }
+-    else if(isXFCERunning() && UnixCommand::hasTheExecutable(ctn_XFCE_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_XFCE_FILE_MANAGER, s );
+-    }
+-    else if (isKDERunning())
+-    {
+-      if (UnixCommand::hasTheExecutable(ctn_KDE4_FILE_MANAGER))
+-      {
+-        s << dir;
+-        p->startDetached( ctn_KDE4_FILE_MANAGER, s);
+-      }
+-      else if (UnixCommand::hasTheExecutable(ctn_KDE_FILE_MANAGER))
+-      {
+-        s << QStringLiteral("newTab");
+-        s << dir;
+-        p->startDetached( ctn_KDE_FILE_MANAGER, s );
+-      }
+-    }
+-    else if (isTDERunning())
+-    {
+-      if (UnixCommand::hasTheExecutable(ctn_TDE_FILE_MANAGER))
+-      {
+-        s << QStringLiteral("newTab");
+-        s << dir;
+-        p->startDetached( ctn_TDE_FILE_MANAGER, s );
+-      }
+-    }
+-    else if (isMATERunning() && UnixCommand::hasTheExecutable(ctn_MATE_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_MATE_FILE_MANAGER, s );
+-    }
+-    else if (isCinnamonRunning() && UnixCommand::hasTheExecutable(ctn_CINNAMON_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_CINNAMON_FILE_MANAGER, s );
+-    }
+-    else if (isLXQTRunning() && UnixCommand::hasTheExecutable(ctn_LXQT_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_LXQT_FILE_MANAGER, s );
+-    }
+-    else if (isLuminaRunning() && UnixCommand::hasTheExecutable(ctn_LUMINA_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_LUMINA_FILE_MANAGER, s );
+-    }
+-    else if (UnixCommand::hasTheExecutable(ctn_XFCE_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_XFCE_FILE_MANAGER, s );
+-    }
+-    else if (UnixCommand::hasTheExecutable(ctn_LXDE_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_LXDE_FILE_MANAGER, s );
+-    }
+-    else if (UnixCommand::hasTheExecutable(ctn_GNOME_FILE_MANAGER))
+-    {
+-      s << dir;
+-      p->startDetached( ctn_GNOME_FILE_MANAGER, s );
+-    }
+-  }
++  QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+ }

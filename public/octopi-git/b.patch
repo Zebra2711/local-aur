@@ -1,0 +1,21 @@
+commit 6cf7c3431e11b52e669700ea7fa057bfd2340c38
+Author: Zebra2711 <zebra2711t@gmail.com>
+Date:   Mon Mar 16 12:56:27 2026 +0700
+
+    fix: add xdg-open fallback for openDirectory
+
+diff --git a/src/wmhelper.cpp b/src/wmhelper.cpp
+index c163022e..a091336e 100644
+--- a/src/wmhelper.cpp
++++ b/src/wmhelper.cpp
+@@ -549,5 +549,10 @@ void WMHelper::openDirectory(const QString& dirName)
+       s << dir;
+       p->startDetached( ctn_GNOME_FILE_MANAGER, s );
+     }
++    else if (UnixCommand::hasTheExecutable(ctn_XDG_OPEN))
++    {
++      s << dir;
++      p->startDetached( ctn_XDG_OPEN, s);
++    }
+   }
+ }

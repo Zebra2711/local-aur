@@ -1,0 +1,53 @@
+# Maintainer: your name
+pkgname=bpfire-xdp
+pkgver=1.4.0
+pkgrel=1
+pkgdesc="BPFire eBPF XDP SYNPROXY - DDoS SYN flood protection"
+arch=('x86_64')
+url="https://github.com/xdp-project/bpf-examples"
+license=('GPL2')
+depends=('libbpf' 'libxdp' 'bpf')
+makedepends=('clang' 'llvm' 'git' 'linux-tachyon-headers')
+source=("bpf-examples::git+https://github.com/xdp-project/bpf-examples.git"
+        "bpfire-xdp.service"
+        "bpfire-xdp.sh"
+)
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP')
+
+prepare() {
+    cd "$srcdir/bpf-examples"
+    git submodule update --init --recursive
+    ./configure
+}
+
+build() {
+    cd "$srcdir/bpf-examples/xdp-synproxy"
+
+    # Generate vmlinux_local.h from running kernel BTF
+    # bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux_local.h
+
+    make
+}
+
+package() {
+    local _synproxy="$srcdir/bpf-examples/xdp-synproxy"
+
+    # Install main binary
+    install -Dm755 "$_synproxy/xdp_synproxy" \
+                   "$pkgdir/usr/bin/xdp_synproxy"
+
+    # Install eBPF object
+    install -dm755 "$pkgdir/usr/lib/bpfire-xdp"
+    install -Dm644 "$_synproxy/xdp_synproxy_kern.o" \
+                   "$pkgdir/usr/lib/bpfire-xdp/"
+
+    # Install control script
+    install -Dm755 "$srcdir/bpfire-xdp.sh" \
+                   "$pkgdir/usr/bin/bpfire-xdp"
+
+    # Install service
+    install -Dm644 "$srcdir/bpfire-xdp.service" \
+                   "$pkgdir/usr/lib/systemd/system/bpfire-xdp.service"
+}

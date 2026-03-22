@@ -48,6 +48,10 @@ if [ -n "${INPUT_MAKEPKGCONF:-}" ]; then
         done
     fi
 fi
+curl "https://gitea.artixlinux.org/packages/artix-mirrorlist/raw/branch/master/mirrorlist" -o /etc/pacman.d/mirrorlist
+curl -Lo /etc/pacman.d/mirrorlist-arch "https://archlinux.org/mirrorlist/all/"
+sed -i 's/^#Server/Server/g' /etc/pacman.d/mirrorlist-arch
+sed -i 's/^#Server/Server/g' /etc/pacman.d/mirrorlist
 
 # Update before continuing
 pacman -Syu --noconfirm
