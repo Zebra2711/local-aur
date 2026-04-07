@@ -7,9 +7,9 @@
 # Contributor: Eothred <yngve.levinsen@gmail.com>
 
 pkgname=spotify
-pkgver='1.2.84.476'
+pkgver='1.2.86.502'
 epoch=1
-_commit=ga1ff6607
+_commit=g8cd7fb22
 _hdiff=0
 pkgrel=99
 pkgdesc='A proprietary music streaming service'
